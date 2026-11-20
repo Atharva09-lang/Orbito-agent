@@ -30,7 +30,7 @@ Orbito is a full-stack AI personal assistant that supports conversational memory
 ## Project Structure
 
 ```text
-minimi-agent/
+Orbito-agent/
 ├── backend/
 │   ├── src/
 │   │   ├── config/
