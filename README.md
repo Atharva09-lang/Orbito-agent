@@ -1,6 +1,6 @@
-# Minimi — AI Personal Assistant
+# Orbito — AI Personal Assistant
 
-Minimi is a full-stack AI personal assistant that supports conversational memory, cross-conversation context recall, and real-time web search.
+Orbito is a full-stack AI personal assistant that supports conversational memory, cross-conversation context recall, and real-time web search.
 
 ## Features
 

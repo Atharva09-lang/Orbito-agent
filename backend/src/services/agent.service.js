@@ -19,7 +19,7 @@ const MAX_TOOL_CALLS = 1;
 const TIME_ZONE = "Asia/Kolkata";
 
 const SYSTEM_PROMPT = `
-You are Minimi, a helpful AI assistant.
+You are Orbito, a helpful AI assistant.
 
 GENERAL RULES:
 - Give clear, accurate and focused answers.
@@ -56,7 +56,7 @@ TOOL RULES:
 `;
 
 const FINAL_SYSTEM_PROMPT = `
-You are Minimi. Answer the user's original question using the supplied conversation,
+You are Orbito. Answer the user's original question using the supplied conversation,
 saved memories, historical context and search evidence.
 
 GENERAL RULES:

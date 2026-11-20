@@ -1,8 +1,8 @@
-# Minimi: Design Document
+# Orbito: Design Document
 
 ## 1. How It Works
 
-Minimi is a personal AI assistant. The frontend is React, the backend is Node.js with Express, and the data lives in Neon PostgreSQL. You can sign in, chat with it, look back at earlier conversations, save memories, search the web for current information, and set reminders.
+Orbito is a personal AI assistant. The frontend is React, the backend is Node.js with Express, and the data lives in Neon PostgreSQL. You can sign in, chat with it, look back at earlier conversations, save memories, search the web for current information, and set reminders.
 
 ### What happens when you send a message
 
@@ -17,11 +17,11 @@ Minimi is a personal AI assistant. The frontend is React, the backend is Node.js
 
 The agent can make only one tool call per request. This keeps each run predictable and much easier to debug.
 
-When I say "past conversations", I mean chats stored in Minimi's own database. Conversations from other services aren't imported.
+When I say "past conversations", I mean chats stored in Orbito's own database. Conversations from other services aren't imported.
 
 ### Memory
 
-Minimi picks out useful information from conversations and stores it in PostgreSQL. When a new message comes in, the relevant memories are fetched and given to the assistant as context. That's how it can recall things and commitments from earlier, even in a completely different chat session.
+Orbito picks out useful information from conversations and stores it in PostgreSQL. When a new message comes in, the relevant memories are fetched and given to the assistant as context. That's how it can recall things and commitments from earlier, even in a completely different chat session.
 
 ### Reminders and nudges
 
@@ -60,14 +60,14 @@ Keeping these apart makes the code easier to maintain, test and extend.
 - **MongoDB:** I decided on PostgreSQL because the data is clearly connected: users, conversations, messages, memories and reminders all relate to each other, and relational constraints protect those links.
 - **Custom authentication:** I used Neon Auth rather than writing password and session handling myself.
 - **Multiple tool calls per request:** I stuck with one to keep the agent easy to control and debug.
-- **A multi-agent framework:** A direct LLM tool-calling setup does everything Minimi needs today. A framework would add complexity without a clear payoff at this stage.
+- **A multi-agent framework:** A direct LLM tool-calling setup does everything Orbito needs today. A framework would add complexity without a clear payoff at this stage.
 - **Separate repositories for frontend and backend:** I kept everything in one repo to make development and project management simpler.
 
 ---
 
 ## 4. Error Handling and Reliability
 
-Minimi has basic error handling for problems with the LLM provider, the search service, the database and the API itself.
+Orbito has basic error handling for problems with the LLM provider, the search service, the database and the API itself.
 
 - API errors are handled in one central place, so the frontend gets a clean response instead of raw internal details.
 - If a web search fails, the error is caught and the agent can still reply with a fallback when possible.

@@ -66,7 +66,7 @@ function ReminderForm({ onClose, onCreated }) {
 
       <input
         type="text"
-        placeholder="What should Minimi remind you about?"
+        placeholder="What should Orbito remind you about?"
         value={message}
         onChange={(event) => setMessage(event.target.value)}
         maxLength={2000}

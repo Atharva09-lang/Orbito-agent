@@ -25,7 +25,7 @@ function ChatInput({
           value={value}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Message Minimi..."
+          placeholder="Message Orbito..."
           rows="1"
           disabled={disabled}
         />

@@ -1,7 +1,7 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "description": "Minimi AI Chat Agent Backend",
+  "description": "Orbito AI Chat Agent Backend",
   "type": "module",
   "main": "src/server.js",
   "scripts": {

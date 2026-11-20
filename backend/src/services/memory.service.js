@@ -14,7 +14,7 @@ const ALLOWED_TYPES = [
 ];
 
 const EXTRACTION_PROMPT = `
-You are Minimi's memory extraction system.
+You are Orbito's memory extraction system.
 
 Analyze the user's latest message and extract useful information
 that may help personalize future conversations.

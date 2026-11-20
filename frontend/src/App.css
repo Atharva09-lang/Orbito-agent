@@ -1370,3 +1370,190 @@ body,
   width: 100%;
   margin: 0 auto;
 }
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.9);
+  animation: pulseGlow 2s ease-in-out infinite;
+}
+
+@keyframes pulseGlow {
+  0%, 100% { opacity: 0.5; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+
+.ai-icon {
+  position: relative;
+  background: radial-gradient(circle at 32% 28%, #ffffff 0%, #cfcfcf 38%, #6f6f6f 72%, #2e2e2e 100%);
+  color: #0a0a0a;
+  box-shadow: 0 0 34px rgba(255, 255, 255, 0.28), inset 0 0 12px rgba(255, 255, 255, 0.35);
+  animation: orbFloat 4.5s ease-in-out infinite;
+}
+
+@keyframes orbFloat {
+  0%, 100% { transform: translateY(0); box-shadow: 0 0 34px rgba(255,255,255,0.28), inset 0 0 12px rgba(255,255,255,0.35); }
+  50% { transform: translateY(-6px); box-shadow: 0 0 48px rgba(255,255,255,0.42), inset 0 0 12px rgba(255,255,255,0.35); }
+}
+
+.orbit-ring {
+  position: absolute;
+  inset: -9px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-top-color: rgba(255, 255, 255, 0.85);
+  animation: orbitSpin 3.2s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes orbitSpin {
+  to { transform: rotate(360deg); }
+}
+
+.welcome-message {
+  animation: welcomeIn 0.5s ease-out;
+}
+
+@keyframes welcomeIn {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.welcome-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 26px;
+}
+
+.welcome-chips span {
+  padding: 8px 16px;
+  border: 1px solid #333;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #1a1a1a, #121212);
+  color: #c9c9c9;
+  font-size: 12.5px;
+  transition: 0.25s ease;
+}
+
+.welcome-chips span:hover {
+  border-color: #666;
+  color: #fff;
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.12);
+  transform: translateY(-2px);
+}
+
+.message-row {
+  animation: messageIn 0.28s ease-out;
+}
+
+@keyframes messageIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.user-bubble {
+  background: linear-gradient(135deg, #ffffff 0%, #d8d8d8 100%);
+  box-shadow: 0 2px 14px rgba(255, 255, 255, 0.14);
+}
+
+.assistant-bubble {
+  border: 1px solid #242424;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+}
+
+.typing-indicator {
+  border: 1px solid #242424;
+  box-shadow: 0 0 18px rgba(255, 255, 255, 0.07);
+}
+
+.new-chat-btn {
+  background: linear-gradient(180deg, #ffffff 0%, #dcdcdc 100%);
+  box-shadow: 0 2px 12px rgba(255, 255, 255, 0.14);
+  transition: background 0.2s, transform 0.2s, box-shadow 0.2s;
+}
+
+.new-chat-btn:hover {
+  background: linear-gradient(180deg, #ffffff 0%, #cfcfcf 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 20px rgba(255, 255, 255, 0.24);
+}
+
+.send-btn:not(:disabled) {
+  background: linear-gradient(180deg, #ffffff 0%, #dcdcdc 100%);
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.22);
+}
+
+.send-btn:hover:not(:disabled) {
+  background: #fff;
+  box-shadow: 0 0 22px rgba(255, 255, 255, 0.4);
+  transform: translateY(-1px);
+}
+
+.input-container:focus-within {
+  border-color: #bbb;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.07), 0 0 26px rgba(255, 255, 255, 0.09);
+}
+
+.brand h2 span {
+  display: inline-block;
+  animation: pulseGlow 2.4s ease-in-out infinite;
+}
+
+.chat-content::-webkit-scrollbar,
+.sidebar::-webkit-scrollbar {
+  width: 8px;
+}
+
+.chat-content::-webkit-scrollbar-thumb,
+.sidebar::-webkit-scrollbar-thumb {
+  background: #2e2e2e;
+  border-radius: 8px;
+}
+
+.chat-content::-webkit-scrollbar-thumb:hover,
+.sidebar::-webkit-scrollbar-thumb:hover {
+  background: #454545;
+}
+
+.chat-content::-webkit-scrollbar-track,
+.sidebar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.auth-loading {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  color: #bbb;
+  font-size: 15px;
+  letter-spacing: 0.4px;
+  background: #090909;
+  animation: pulseGlow 1.8s ease-in-out infinite;
+}
+
+.conversation-item {
+  transition: background 0.2s ease, transform 0.15s ease;
+}
+
+.conversation-item:hover {
+  transform: translateX(2px);
+}
+
+.logout-btn:hover {
+  box-shadow: 0 0 12px rgba(255, 255, 255, 0.15);
+}
+
+.topbar {
+  background: rgba(9, 9, 9, 0.7);
+  backdrop-filter: blur(8px);
+}

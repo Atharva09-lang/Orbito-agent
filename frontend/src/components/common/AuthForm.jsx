@@ -40,7 +40,7 @@ function AuthForm() {
       <div className="auth-card">
         <div className="auth-brand">
           <div className="auth-logo">✦</div>
-          <span>minimi<span className="brand-dot">.</span></span>
+          <span>orbito<span className="brand-dot">.</span></span>
         </div>
 
         <div className="auth-heading">

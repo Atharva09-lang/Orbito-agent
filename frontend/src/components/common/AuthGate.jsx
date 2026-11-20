@@ -5,7 +5,7 @@ function AuthGate({ children }) {
   const { data: session, isPending } = authClient.useSession()
 
   if (isPending) {
-    return <div className="auth-loading">Loading Minimi...</div>
+    return <div className="auth-loading">Loading Orbito...</div>
   }
 
   if (!session?.user) {

@@ -37,7 +37,7 @@ function ChatApp() {
       <aside className="sidebar">
         <div className="brand">
           <h2>
-            minimi<span>.</span>
+            orbito<span>.</span>
           </h2>
         </div>
 
@@ -87,7 +87,10 @@ function ChatApp() {
             {activeConversationId ? 'Conversation' : 'New Conversation'}
           </span>
 
-          <span className="status">✦ AI Ready</span>
+          <span className="status">
+            <span className="pulse-dot" />
+            AI Ready
+          </span>
         </header>
 
         {error && (
@@ -118,7 +121,7 @@ function ChatApp() {
           />
 
           <p className="disclaimer">
-            Minimi AI can make mistakes. Verify important information.
+            Orbito AI can make mistakes. Verify important information.
           </p>
         </footer>
       </main>
