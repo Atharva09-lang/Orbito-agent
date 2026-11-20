@@ -5,24 +5,32 @@ const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api'
 
 async function apiRequest(endpoint, options = {}) {
-  const token = await getApiToken()
+  // The backend fetches JWKS remotely on first verification; if the auth
+  // instance was cold that fails with 401, so retry once with a fresh token.
+  for (let attempt = 1; ; attempt++) {
+    const token = await getApiToken()
 
-  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-      Authorization: `Bearer ${token}`,
-    },
-  })
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...options.headers,
+        Authorization: `Bearer ${token}`,
+      },
+    })
 
-  const data = await response.json().catch(() => null)
+    const data = await response.json().catch(() => null)
 
-  if (!response.ok) {
-    throw new Error(data?.message || data?.error || 'Something went wrong.')
+    if (!response.ok) {
+      if (response.status === 401 && attempt === 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1500))
+        continue
+      }
+      throw new Error(data?.message || data?.error || 'Something went wrong.')
+    }
+
+    return data
   }
-
-  return data
 }
 
 export const getConversations = () =>

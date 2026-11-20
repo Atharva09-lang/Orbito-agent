@@ -11,6 +11,10 @@ if(!jwksUrl || !baseUrl) {
 const JWKS = createRemoteJWKSet(new URL(jwksUrl));
 const issuer = new URL(baseUrl).origin;
 
+// The auth instance is serverless and may be suspended when idle; warm it at
+// startup so the first token verification doesn't hit a cold start.
+fetch(jwksUrl).catch(() => {});
+
 export async function verifyToken(req,res,next){
     try{
     const authHeader = req.headers.authorization;

@@ -12,7 +12,10 @@ const authClient = createAuthClient(authUrl, {
   adapter: BetterAuthReactAdapter(),
 })
 
-export async function getApiToken() {
+const TOKEN_RETRIES = 3
+const RETRY_DELAY_MS = 1500
+
+async function fetchTokenOnce() {
   const response = await fetch(`${authUrl}/token`, {
     method: 'GET',
     credentials: 'include',
@@ -21,10 +24,28 @@ export async function getApiToken() {
   const data = await response.json().catch(() => null)
 
   if (!response.ok || !data?.token) {
-    throw new Error('Unable to retrieve authentication token. Please sign in again.')
+    const error = new Error('Unable to retrieve authentication token. Please sign in again.')
+    error.retryable = response.status >= 500 || response.status === 401 || response.status === 429
+    throw error
   }
 
   return data.token
+}
+
+export async function getApiToken() {
+  // Neon Auth is serverless: the first request after idle can fail while the
+  // instance cold-starts, so retry before surfacing the error.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fetchTokenOnce()
+    } catch (err) {
+      const isNetworkError = err instanceof TypeError
+      if (attempt >= TOKEN_RETRIES || (!isNetworkError && !err.retryable)) {
+        throw err
+      }
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * attempt))
+    }
+  }
 }
 
 export default authClient
