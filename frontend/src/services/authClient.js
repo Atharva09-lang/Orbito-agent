@@ -33,8 +33,6 @@ async function fetchTokenOnce() {
 }
 
 export async function getApiToken() {
-  // Neon Auth is serverless: the first request after idle can fail while the
-  // instance cold-starts, so retry before surfacing the error.
   for (let attempt = 1; ; attempt++) {
     try {
       return await fetchTokenOnce()

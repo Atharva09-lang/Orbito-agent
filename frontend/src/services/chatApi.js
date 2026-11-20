@@ -5,8 +5,6 @@ const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api'
 
 async function apiRequest(endpoint, options = {}) {
-  // The backend fetches JWKS remotely on first verification; if the auth
-  // instance was cold that fails with 401, so retry once with a fresh token.
   for (let attempt = 1; ; attempt++) {
     const token = await getApiToken()
 
