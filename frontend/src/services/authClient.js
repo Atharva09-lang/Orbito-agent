@@ -12,7 +12,7 @@ const authClient = createAuthClient(authUrl, {
   adapter: BetterAuthReactAdapter(),
 })
 
-const TOKEN_RETRIES = 3
+const TOKEN_RETRIES = 4
 const RETRY_DELAY_MS = 1500
 
 async function fetchTokenOnce() {
