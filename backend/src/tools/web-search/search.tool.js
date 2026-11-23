@@ -1,9 +1,55 @@
 
 import { tavily } from "@tavily/core";
 
-const client = tavily();
-
 const MAX_RESULTS = 8;
+const SEARCH_ATTEMPTS = 3;
+const SEARCH_TIMEOUT_SECONDS = 20;
+
+let client = null;
+
+function getClient() {
+  if (!client) {
+    const apiKey = process.env.TAVILY_API_KEY;
+
+    if (!apiKey) {
+      throw new Error("TAVILY_API_KEY is missing from environment variables.");
+    }
+
+    client = tavily({ apiKey });
+  }
+
+  return client;
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runSearch(query, options) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= SEARCH_ATTEMPTS; attempt++) {
+    try {
+      return await getClient().search(query, {
+        ...options,
+        timeout: SEARCH_TIMEOUT_SECONDS
+      });
+    } catch (error) {
+      lastError = error;
+
+      console.warn(
+        `[Web Search] Attempt ${attempt}/${SEARCH_ATTEMPTS} failed:`,
+        error.message
+      );
+
+      if (attempt < SEARCH_ATTEMPTS) {
+        await wait(500 * attempt);
+      }
+    }
+  }
+
+  throw lastError;
+}
 
 const OFFICIAL_SOURCES = {
   salesforce: {
@@ -213,7 +259,7 @@ async function searchSource(query, source, limit) {
   const searchQuery = `${query} ${source.hint}`;
 
   //first search the official vendor domain.
-  const officialResponse = await client.search(
+  const officialResponse = await runSearch(
     searchQuery,
     getSearchOptions(searchQuery, [source.domain], limit)
   );
@@ -226,7 +272,7 @@ async function searchSource(query, source, limit) {
 
   //search more broadly only when official results are insufficient.
   if (results.length < limit) {
-    const fallbackResponse = await client.search(
+    const fallbackResponse = await runSearch(
       searchQuery,
       getSearchOptions(searchQuery, undefined, limit)
     );
@@ -275,18 +321,26 @@ export async function searchWeb(query) {
         MAX_RESULTS / matchedSources.length
       );
 
-      const responses = await Promise.all(
+      const settled = await Promise.allSettled(
         matchedSources.map((source) =>
           searchSource(cleanedQuery, source, perSourceLimit)
         )
       );
+
+      const responses = settled
+        .filter((item) => item.status === "fulfilled")
+        .map((item) => item.value);
+
+      if (responses.length === 0) {
+        throw settled[0].reason;
+      }
 
       //keep each matched vendor represented in the final evidence.
       results = balanceResults(responses, MAX_RESULTS);
 
       //general fallback only when all vendor searches return nothing.
       if (results.length === 0) {
-        const fallback = await client.search(
+        const fallback = await runSearch(
           cleanedQuery,
           getSearchOptions(cleanedQuery)
         );
@@ -294,7 +348,7 @@ export async function searchWeb(query) {
         results = normalizeResults(fallback.results, []);
       }
     } else {
-      const response = await client.search(
+      const response = await runSearch(
         cleanedQuery,
         getSearchOptions(cleanedQuery)
       );

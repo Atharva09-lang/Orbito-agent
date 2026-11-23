@@ -8,10 +8,12 @@ if(!jwksUrl || !baseUrl) {
 }
 
 
-const JWKS = createRemoteJWKSet(new URL(jwksUrl));
+const JWKS = createRemoteJWKSet(new URL(jwksUrl), {
+    timeoutDuration: 10000
+});
 const issuer = new URL(baseUrl).origin;
 
-fetch(jwksUrl).catch(() => {});
+JWKS.reload().catch(() => {});
 
 export async function verifyToken(req,res,next){
     try{
