@@ -24,7 +24,7 @@ function ConversationList({
           key={conversation.id}
           className={`conversation-item ${
             activeConversationId === conversation.id ? 'active' : ''
-          }`}
+          } ${openMenuId === conversation.id ? 'menu-open' : ''}`}
         >
           <button
             type="button"

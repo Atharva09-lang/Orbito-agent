@@ -1557,3 +1557,7 @@ body,
   background: rgba(9, 9, 9, 0.7);
   backdrop-filter: blur(8px);
 }
+
+.conversation-item.menu-open {
+  z-index: 20;
+}
