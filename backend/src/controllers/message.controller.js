@@ -8,6 +8,16 @@ import { runAgent } from "../services/agent.service.js";
 import { extractAndSaveMemories } from "../services/memory.service.js";
 
 
+function isTokenLimitError(error) {
+  if (error?.status === 429 || error?.status === 413) {
+    return true;
+  }
+
+  const details = `${error?.code ?? ""} ${error?.type ?? ""} ${error?.message ?? ""}`;
+
+  return /rate_limit|context_length|request_too_large|tokens? per|token limit/i.test(details);
+}
+
 export async function createMessageController(req, res) {
   try {
     const { content, role = "user", metadata = {} } = req.body;
@@ -88,6 +98,13 @@ export async function createMessageController(req, res) {
 
   } catch (error) {
     console.error("Message controller error:", error);
+
+    if (isTokenLimitError(error)) {
+      return res.status(429).json({
+        success: false,
+        message: "Token limit exceeded. Please try again later."
+      });
+    }
 
     return res.status(500).json({
       success: false,
