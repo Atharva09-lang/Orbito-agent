@@ -70,7 +70,7 @@ export async function extractAndSaveMemories(
         role: "user",
         content: message
       }
-    ]);
+    ], [], { purpose: "memory_extraction" });
 
     const parsed = JSON.parse(result.content);
 

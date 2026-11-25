@@ -711,7 +711,8 @@ ${memories
   while (toolCallCount < MAX_TOOL_CALLS) {
     const result = await generateResponse(
       workingMessages,
-      availableTools
+      availableTools,
+      { purpose: "agent_response" }
     );
 
     initialResult = result;
@@ -814,7 +815,9 @@ Clearly disclose missing or conflicting evidence.
     }
   ];
 
-  const finalResult = await generateResponse(finalMessages);
+  const finalResult = await generateResponse(finalMessages, [], {
+    purpose: "web_search_final_response"
+  });
 
   if (finalResult.usage) {
     usage.push(finalResult.usage);
