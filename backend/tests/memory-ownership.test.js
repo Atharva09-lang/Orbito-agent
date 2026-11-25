@@ -65,12 +65,12 @@ async function testMemoryOwnership() {
     console.log("\nOwnership test results:");
 
     console.log("User B can read:", canRead);
-    console.log("User B can update:", updateResult !== null);
+    console.log("User B can update:", updateResult?.status !== "not_found");
     console.log("User B can deactivate:", deleteResult);
 
     if (
       !canRead &&
-      updateResult === null &&
+      updateResult?.status === "not_found" &&
       deleteResult === false
     ) {
       console.log("\nPASS: User ownership restrictions work.");

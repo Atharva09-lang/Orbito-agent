@@ -2,10 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  analyzeMemoryAttribution,
   buildMemoryContent,
   formatMemoryContext,
+  normalizeSubject,
   parseMemorySubject,
-  planMemoryActions
+  planMemoryActions,
+  subjectsMatch,
+  validateMemoryAttribution
 } from "../../src/utils/memory-format.js";
 
 const NOW = new Date("2026-11-25T00:00:00.000Z");
@@ -60,20 +64,44 @@ test("a clear permanent change supersedes the old preference", () => {
   assert.equal(plan[0].replacesId, "m1");
 });
 
-test("updates are refused for unknown ids, other subjects, temporary items or low confidence", () => {
+test("an update still supersedes its target when the replacement already exists", () => {
+  const old = { id: "python-id", memory_type: "preference", content: "Prefers Python for backend development." };
+  const replacement = {
+    id: "node-id",
+    memory_type: "preference",
+    content: "Prefers Node.js for backend development."
+  };
+  const [step] = planMemoryActions([
+    extracted({ action: "update", replaces_id: "python-id", content: replacement.content })
+  ], [old], [old, replacement], NOW);
+
+  assert.deepEqual(step, {
+    type: "supersede",
+    replacesId: "python-id",
+    memory: {
+      memoryType: "preference",
+      content: replacement.content,
+      confidence: 0.95,
+      importance: 4,
+      expiresAt: null
+    }
+  });
+});
+
+test("invalid updates are skipped instead of becoming contradictory additions", () => {
   const old = { id: "m1", memory_type: "preference", content: "Prefers Python." };
   const cases = [
     extracted({ action: "update", replaces_id: "unknown" }),
     extracted({ action: "update", replaces_id: "m1", subject: "user's brother", content: "Prefers Go." }),
     extracted({ action: "update", replaces_id: "m1", duration: "temporary", content: "Using Go this week." }),
-    extracted({ action: "update", replaces_id: "m1", confidence: 0.5, content: "Maybe prefers Rust." }),
+    extracted({ action: "update", replaces_id: "m1", confidence: 0.5, content: "Prefers Rust." }),
     extracted({ action: "update", replaces_id: "m1", memory_type: "fact", content: "Works with Go." })
   ];
 
   for (const item of cases) {
     const [step] = planMemoryActions([item], [old], [old], NOW);
 
-    assert.equal(step.type, "add", JSON.stringify(item));
+    assert.deepEqual(step, { type: "skip", reason: "invalid_update" });
   }
 });
 
@@ -143,5 +171,419 @@ test("one old memory cannot be superseded twice", () => {
     NOW
   );
 
-  assert.deepEqual(plan.map((step) => step.type), ["supersede", "add"]);
+  assert.deepEqual(plan.map((step) => step.type), ["supersede", "skip"]);
+  assert.equal(plan[1].reason, "invalid_update");
+});
+
+test("user and other-person preferences keep their explicit subjects", () => {
+  const plan = planMemoryActions([
+    extracted({ subject: "user", content: "Prefers C++ for DSA." }),
+    extracted({ subject: "Rahul", content: "Prefers Java for DSA." })
+  ], [], [], NOW);
+
+  assert.equal(plan[0].memory.content, "Prefers C++ for DSA.");
+  assert.equal(plan[1].memory.content, "[about: rahul] Prefers Java for DSA.");
+
+  const context = formatMemoryContext(plan.map((step) => ({
+    memory_type: step.memory.memoryType,
+    content: step.memory.content
+  })));
+
+  assert.match(context, /About the user:\n- \[preference\] Prefers C\+\+ for DSA\./);
+  assert.match(context, /About other people the user mentioned \(not facts about the user\):\n- \[preference\] \(rahul\) Prefers Java for DSA\./);
+});
+
+test("ambiguous third-person content is not attributed to the user", () => {
+  const [step] = planMemoryActions([
+    extracted({ subject: "user", content: "Rahul prefers Java for DSA." })
+  ], [], [], NOW);
+
+  assert.deepEqual(step, { type: "skip", reason: "ambiguous_subject" });
+});
+
+test("sentence starters do not make a user preference look third-person", () => {
+  const [step] = planMemoryActions([
+    extracted({ subject: "user", content: "Currently prefers Node.js for backend development." })
+  ], [], [], NOW);
+
+  assert.equal(step.type, "add");
+  assert.equal(step.memory.content, "Currently prefers Node.js for backend development.");
+});
+
+test("a missing subject is skipped instead of defaulting to the user", () => {
+  const item = extracted({ content: "Prefers Java for DSA." });
+  delete item.subject;
+  const [step] = planMemoryActions([item], [], [], NOW);
+
+  assert.deepEqual(step, { type: "skip", reason: "missing_subject" });
+});
+
+test("an explicit about prefix can supply a missing extraction subject", () => {
+  const item = extracted({ content: "[about: Rahul] Prefers Java for DSA." });
+  delete item.subject;
+  const [step] = planMemoryActions([item], [], [], NOW);
+
+  assert.equal(step.type, "add");
+  assert.equal(step.memory.content, "[about: rahul] Prefers Java for DSA.");
+});
+
+test("memory context labels current and historical preferences separately", () => {
+  const context = formatMemoryContext([
+    { memory_type: "preference", content: "Prefers Java for backend development." },
+    { memory_type: "fact", content: "Previous preference: Prefers Node.js for backend development." },
+    { memory_type: "fact", content: "Previous preference: Prefers Python for backend development." },
+    { memory_type: "preference", content: "[about: rahul] Prefers Java for DSA." }
+  ]);
+
+  assert.match(context, /About the user:\n- \[preference\] Prefers Java for backend development\./);
+  assert.match(context, /Historical preferences \(not current\):\n- \[historical preference\] Prefers Node.js for backend development\.\n- \[historical preference\] Prefers Python for backend development\./);
+  assert.ok(context.indexOf("Python") > context.indexOf("Historical preferences"));
+  assert.match(context, /About other people the user mentioned \(not facts about the user\):\n- \[preference\] \(rahul\) Prefers Java for DSA\./);
+});
+
+test("other-person preference history is separated from current other-person memories", () => {
+  const context = formatMemoryContext([
+    { memory_type: "preference", content: "[about: rahul] Prefers Java for backend development." },
+    { memory_type: "fact", content: "[about: rahul] Previous preference: Prefers Python for backend development." }
+  ]);
+
+  assert.match(context, /About other people[\s\S]*\(rahul\) Prefers Java/);
+  assert.match(context, /Historical preferences \(not current\):[\s\S]*\(rahul\) Prefers Python/);
+  assert.doesNotMatch(context, /About other people[\s\S]*Previous preference:/);
+});
+
+test("legacy unprefixed memories remain readable as user memories", () => {
+  const context = formatMemoryContext([
+    { memory_type: "preference", content: "Prefers Python for backend development." }
+  ]);
+
+  assert.match(context, /About the user:\n- \[preference\] Prefers Python for backend development\./);
+});
+
+test("named-person attribution is case-insensitive", () => {
+  for (const content of [
+    "Rahul prefers Java for DSA.",
+    "rahul prefers Java for DSA.",
+    "RAHUL prefers Java for DSA."
+  ]) {
+    assert.deepEqual(analyzeMemoryAttribution(content), {
+      subject: "rahul",
+      text: content,
+      explicit: false,
+      ambiguous: false
+    });
+
+    const result = validateMemoryAttribution(content, "user", {
+      requireSubject: true
+    });
+
+    assert.equal(result.valid, false);
+    assert.equal(result.reason, "ambiguous_subject");
+  }
+});
+
+test("safe user wording is not mistaken for a named person", () => {
+  const contents = [
+    "User prefers C++ for DSA.",
+    "Java is the preferred backend language.",
+    "Currently prefers Node.js for backend development.",
+    "C++ is the preferred DSA language."
+  ];
+
+  for (const content of contents) {
+    const [step] = planMemoryActions([extracted({ content })], [], [], NOW);
+
+    assert.equal(step.type, "add");
+    assert.equal(step.memory.content, content);
+  }
+});
+
+test("one extraction keeps the user and multiple other people separate", () => {
+  const plan = planMemoryActions([
+    extracted({ subject: "user", content: "Prefers C++ for DSA." }),
+    extracted({ subject: "Rahul", content: "Prefers Java for DSA." }),
+    extracted({ subject: "user's sister", content: "Prefers Python for DSA." })
+  ], [], [], NOW);
+
+  assert.deepEqual(plan.map((step) => step.memory.content), [
+    "Prefers C++ for DSA.",
+    "[about: rahul] Prefers Java for DSA.",
+    "[about: user's sister] Prefers Python for DSA."
+  ]);
+
+  const context = formatMemoryContext(plan.map((step) => ({
+    memory_type: step.memory.memoryType,
+    content: step.memory.content
+  })));
+
+  const userSection = context.split("About other people")[0];
+  assert.match(userSection, /Prefers C\+\+ for DSA\./);
+  assert.doesNotMatch(userSection, /Rahul|Java|sister|Python/);
+  assert.match(context, /\(rahul\) Prefers Java for DSA\./);
+  assert.match(context, /\(user's sister\) Prefers Python for DSA\./);
+});
+
+test("ambiguous and missing extraction subjects are skipped", () => {
+  const missingSubject = extracted({ content: "Prefers Python for DSA." });
+  delete missingSubject.subject;
+
+  const plan = planMemoryActions([
+    extracted({ subject: "user", content: "He prefers Java for DSA." }),
+    missingSubject
+  ], [], [], NOW);
+
+  assert.deepEqual(plan, [
+    { type: "skip", reason: "ambiguous_subject" },
+    { type: "skip", reason: "missing_subject" }
+  ]);
+});
+
+test("legacy named-person rows are isolated without rewriting safe user rows", () => {
+  const context = formatMemoryContext([
+    { memory_type: "preference", content: "Prefers Node.js for backend development." },
+    { memory_type: "preference", content: "Rahul prefers Java for DSA." },
+    { memory_type: "preference", content: "rahul prefers Python for DSA." },
+    { memory_type: "preference", content: "RAHUL likes C++." },
+    { memory_type: "preference", content: "He prefers Go." },
+    { memory_type: "fact", content: "[about: user's sister] Likes jazz." }
+  ]);
+
+  const userSection = context.split("Historical preferences")[0]
+    .split("About other people")[0];
+  assert.match(userSection, /Prefers Node\.js for backend development\./);
+  assert.doesNotMatch(userSection, /Rahul|Java|Python|C\+\+|Go|sister/);
+  assert.match(context, /\(rahul\) Rahul prefers Java for DSA\./);
+  assert.match(context, /\(rahul\) rahul prefers Python for DSA\./);
+  assert.match(context, /\(rahul\) RAHUL likes C\+\+\./);
+  assert.doesNotMatch(context, /Go/);
+  assert.match(context, /\(user's sister\) Likes jazz\./);
+});
+
+test("explicit subject prefixes are authoritative and conflicts are rejected", () => {
+  const tagged = validateMemoryAttribution(
+    "[about: Rahul] Prefers Java for DSA.",
+    "friend Rahul",
+    { requireSubject: true }
+  );
+
+  assert.deepEqual(tagged, {
+    valid: true,
+    subject: "rahul",
+    content: "[about: rahul] Prefers Java for DSA."
+  });
+
+  const conflict = validateMemoryAttribution(
+    "[about: Rahul] Prefers Java for DSA.",
+    "user",
+    { requireSubject: true }
+  );
+
+  assert.equal(conflict.valid, false);
+  assert.equal(conflict.reason, "subject_conflict");
+  assert.equal(subjectsMatch("friend RAHUL", "rahul"), true);
+  assert.equal(subjectsMatch("user's sister", "sister"), true);
+  assert.equal(subjectsMatch("user's sister", "brother"), false);
+});
+
+test("empty tagged content and bracket-only subjects are rejected", () => {
+  assert.deepEqual(
+    validateMemoryAttribution("[about: rahul]", "rahul", { requireSubject: true }),
+    { valid: false, reason: "invalid" }
+  );
+
+  assert.deepEqual(
+    validateMemoryAttribution("Prefers Java for DSA.", "[]", { requireSubject: true }),
+    { valid: false, reason: "invalid" }
+  );
+
+  assert.deepEqual(
+    validateMemoryAttribution("Prefers Java for DSA.", "[ ]", { requireSubject: true }),
+    { valid: false, reason: "invalid" }
+  );
+});
+
+test("manual validation keeps safe user defaults but rejects ambiguous content", () => {
+  assert.deepEqual(
+    validateMemoryAttribution("Prefers Node.js for backend development.", undefined),
+    {
+      valid: true,
+      subject: "user",
+      content: "Prefers Node.js for backend development."
+    }
+  );
+
+  assert.deepEqual(
+    validateMemoryAttribution("Rahul prefers Java for DSA.", undefined),
+    { valid: false, reason: "ambiguous_subject" }
+  );
+});
+
+test("first-person statements always resolve to the user regardless of case", () => {
+  const statements = [
+    "I prefer Java.",
+    "my preferred backend is Node.js.",
+    "WE use PostgreSQL in our project.",
+    "  Me and my team use PostgreSQL.  "
+  ];
+
+  for (const content of statements) {
+    const analysis = analyzeMemoryAttribution(content);
+    assert.equal(analysis.subject, "user");
+    assert.equal(analysis.ambiguous, false);
+    assert.equal(validateMemoryAttribution(content, "user").valid, true);
+    assert.equal(validateMemoryAttribution(content, "Rahul").reason, "subject_conflict");
+  }
+
+  assert.equal(analyzeMemoryAttribution("I prefer Java.").subject, "user");
+  assert.equal(analyzeMemoryAttribution("[about: Rahul] I prefer Java.").subject, "rahul");
+});
+
+test("named people and relationship descriptors are detected conservatively", () => {
+  const cases = [
+    ["Rahul prefers Java.", "rahul"],
+    ["My friend Rahul uses Java.", "rahul"],
+    ["Rahul codes in Java.", "rahul"],
+    ["My sister works with Python.", "user's sister"],
+    ["Our colleague prefers Node.js.", "user's colleague"],
+    ["  RAHUL SWIMS IN JAVA.  ", "rahul"],
+    ["Anita Sen builds Java services.", "anita sen"]
+  ];
+
+  for (const [content, subject] of cases) {
+    const analysis = analyzeMemoryAttribution(content);
+    assert.equal(analysis.subject, subject);
+    assert.equal(analysis.ambiguous, false);
+    assert.equal(validateMemoryAttribution(content, "user").valid, false);
+  }
+});
+
+test("ordinary names and relationships remain attributable without suffix guessing", () => {
+  const cases = [
+    ["Rahul spoke Java.", "rahul"],
+    ["Chris prefers Java.", "chris"],
+    ["Anita Sen spoke Python.", "anita sen"],
+    ["Mary Jane Watson uses Java.", "mary jane watson"],
+    ["Will uses Java.", "will"],
+    ["Dennis prefers Java.", "dennis"],
+    ["My manager prefers Java.", "user's manager"],
+    ["My manager.", "user's manager"],
+    ["My friend Chris uses Java.", "chris"],
+    ["My friend Rahul.", "rahul"],
+    ["My sister.", "user's sister"],
+    ["Our colleague.", "user's colleague"]
+  ];
+
+  for (const [content, subject] of cases) {
+    assert.equal(analyzeMemoryAttribution(content).subject, subject, content);
+    assert.equal(analyzeMemoryAttribution(content).ambiguous, false, content);
+  }
+});
+
+test("embedded pronouns and mixed first-person attribution are rejected", () => {
+  const ambiguous = [
+    "Yesterday he preferred Python.",
+    "Currently she prefers Java.",
+    "Him and his friend use Java.",
+    "Them and their team use Python.",
+    "I saw him use Java.",
+    "He and my manager use Java.",
+    "Yesterday he said my manager uses Java.",
+    "Rahul said I prefer Java.",
+    "Currently my manager prefers Java and I use Python."
+  ];
+
+  for (const content of ambiguous) {
+    assert.equal(analyzeMemoryAttribution(content).ambiguous, true, content);
+    assert.equal(validateMemoryAttribution(content, "user").valid, false, content);
+  }
+
+  for (const content of ["I prefer Java.", "Currently I prefer Java."]) {
+    assert.equal(validateMemoryAttribution(content, "user").valid, true, content);
+    assert.equal(validateMemoryAttribution(content, "Rahul").reason, "subject_conflict", content);
+  }
+
+  assert.equal(validateMemoryAttribution("[about: Rahul] He prefers Java.", "Rahul").valid, true);
+  assert.equal(
+    validateMemoryAttribution("[about: Rahul] Currently I prefer Java.", "Rahul").reason,
+    "subject_conflict"
+  );
+  assert.equal(
+    validateMemoryAttribution("[about: user] He prefers Java.", "user").reason,
+    "ambiguous_subject"
+  );
+  assert.equal(
+    validateMemoryAttribution("[about: user] Rahul spoke Java.", "user").valid,
+    false
+  );
+  assert.equal(
+    validateMemoryAttribution("[about: user] Prefers Java.", "user").valid,
+    true
+  );
+});
+
+test("pronoun-only statements cannot inherit a name from earlier messages", () => {
+  const messages = ["Rahul prefers Java.", "He prefers Python."];
+  const plan = planMemoryActions(messages.map((content, index) => extracted({
+    subject: index === 0 ? "Rahul" : "Rahul",
+    content
+  })), [], [], NOW);
+
+  assert.equal(plan[0].memory.content, "[about: rahul] Rahul prefers Java.");
+  assert.deepEqual(plan[1], { type: "skip", reason: "ambiguous_subject" });
+
+  for (const content of ["He prefers Java.", "SHE uses Python.", "They like Node.js.", "It works with Go."]) {
+    for (const subject of ["user", "Rahul", undefined]) {
+      assert.equal(validateMemoryAttribution(content, subject).reason, "ambiguous_subject");
+    }
+  }
+
+  assert.equal(validateMemoryAttribution("[about: Rahul] He prefers Java.", "Rahul").valid, true);
+});
+
+test("relationship descriptors normalize without merging different people", () => {
+  for (const subject of ["Rahul", "friend Rahul", "My friend Rahul", "RAHUL", "  friend   RAHUL  "]) {
+    assert.equal(normalizeSubject(subject), "rahul");
+  }
+
+  assert.equal(normalizeSubject("sister"), "user's sister");
+  assert.equal(normalizeSubject("My sister"), "user's sister");
+  assert.equal(normalizeSubject("friend Rahul"), "rahul");
+  assert.equal(normalizeSubject("friend Aman"), "aman");
+  assert.equal(subjectsMatch("friend Rahul", "RAHUL"), true);
+  assert.equal(subjectsMatch("friend Rahul", "friend Aman"), false);
+});
+
+test("temporary and permanent duplicate identity includes expiration", () => {
+  const content = "Travelling this week.";
+  const expiry = "2026-12-01T00:00:00.000Z";
+  const otherExpiry = "2026-12-02T00:00:00.000Z";
+  const permanent = [{ id: "permanent", memory_type: "commitment", content, expires_at: null }];
+  const temporary = [{ id: "temporary", memory_type: "commitment", content, expires_at: expiry }];
+
+  const check = (existing, duration, expiresInDays) => planMemoryActions([
+    extracted({ memory_type: "commitment", content, duration, expires_in_days: expiresInDays })
+  ], existing, existing, NOW)[0];
+
+  assert.equal(check(permanent, "permanent", null).reason, "duplicate");
+  assert.equal(check(temporary, "temporary", 6).reason, "duplicate");
+  assert.equal(check(temporary, "temporary", 7).type, "add");
+  assert.equal(check(temporary, "permanent", null).type, "add");
+  assert.equal(check(permanent, "temporary", 6).type, "add");
+  assert.equal(check([{ ...temporary[0], expires_at: otherExpiry }], "temporary", 6).type, "add");
+});
+
+test("leading whitespace and mixed-case explicit subjects parse without changing meaning", () => {
+  const result = validateMemoryAttribution("\n\t  [AbOuT:   Friend RAHUL ]   Prefers Java.  \t", "Rahul", {
+    requireSubject: true
+  });
+
+  assert.deepEqual(result, {
+    valid: true,
+    subject: "rahul",
+    content: "[about: rahul] Prefers Java."
+  });
+
+  for (const content of ["[about Rahul] Prefers Java.", "[about:] Prefers Java.", "[about: [rahul]] Prefers Java."]) {
+    assert.equal(validateMemoryAttribution(content, "Rahul").reason, "ambiguous_subject");
+  }
 });

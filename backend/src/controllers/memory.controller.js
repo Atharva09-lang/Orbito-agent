@@ -1,10 +1,17 @@
 
 import {
   createMemory,
+  getMemoryById,
   getUserMemories,
   updateMemory,
   deactivateMemory
 } from "../repositories/memory.repository.js";
+
+import {
+  analyzeMemoryAttribution,
+  subjectsMatch,
+  validateMemoryAttribution
+} from "../utils/memory-format.js";
 
 const ALLOWED_TYPES = [
   "fact",
@@ -23,6 +30,7 @@ export async function createMemoryController(req, res) {
   try {
     const {
       memoryType,
+      subject,
       content,
       confidence,
       importance,
@@ -39,6 +47,8 @@ export async function createMemoryController(req, res) {
     if (
       typeof content !== "string" ||
       !content.trim() ||
+      (subject !== undefined &&
+        (typeof subject !== "string" || !subject.trim())) ||
       !ALLOWED_TYPES.includes(memoryType) ||
       !Number.isFinite(normalizedConfidence) ||
       normalizedConfidence < 0 ||
@@ -59,10 +69,21 @@ export async function createMemoryController(req, res) {
       });
     }
 
+    const attribution = validateMemoryAttribution(content, subject, {
+      requireSubject: false
+    });
+
+    if (!attribution.valid) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid memory subject or content"
+      });
+    }
+
     const memory = await createMemory(
       req.user.id,
       memoryType,
-      content.trim(),
+      attribution.content,
       {
         confidence: normalizedConfidence,
         importance: normalizedImportance,
@@ -118,7 +139,7 @@ export async function getMemoriesController(req, res) {
 // Update memory content
 export async function updateMemoryController(req, res) {
   try {
-    const { content } = req.body;
+    const { content, subject } = req.body;
     const { id } = req.params;
 
     if (
@@ -132,22 +153,78 @@ export async function updateMemoryController(req, res) {
       });
     }
 
-    const memory = await updateMemory(
-      req.user.id,
-      id,
-      content.trim()
-    );
+    const existing = await getMemoryById(req.user.id, id);
 
-    if (!memory) {
+    if (!existing) {
       return res.status(404).json({
         success: false,
         message: "Memory not found"
       });
     }
 
+    const existingAttribution = analyzeMemoryAttribution(existing.content);
+
+    if (existingAttribution.ambiguous) {
+      return res.status(400).json({
+        success: false,
+        message: "Memory subject is ambiguous"
+      });
+    }
+
+    if (
+      subject !== undefined &&
+      !subjectsMatch(subject, existingAttribution.subject)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Memory subject cannot be changed"
+      });
+    }
+
+    const attribution = validateMemoryAttribution(
+      content,
+      existingAttribution.subject,
+      { requireSubject: true }
+    );
+
+    if (!attribution.valid) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid memory subject or content"
+      });
+    }
+
+    const result = await updateMemory(
+      req.user.id,
+      id,
+      attribution.content
+    );
+
+    if (result.status === "not_found") {
+      return res.status(404).json({
+        success: false,
+        message: "Memory not found"
+      });
+    }
+
+    if (result.status === "duplicate") {
+      return res.status(409).json({
+        success: false,
+        message: "A matching active memory already exists",
+        memory: result.memory
+      });
+    }
+
+    if (result.status !== "updated") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid memory subject or content"
+      });
+    }
+
     return res.status(200).json({
       success: true,
-      memory
+      memory: result.memory
     });
 
   } catch (error) {

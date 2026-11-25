@@ -2,13 +2,14 @@
 import { generateResponse } from "./llm.service.js";
 import {
   createMemory,
-  deactivateMemory,
   getRelevantMemories,
-  getUserMemories
+  getUserMemories,
+  supersedeMemory
 } from "../repositories/memory.repository.js";
 import { TOKEN_BUDGETS, truncateToTokens } from "./token-budget.service.js";
 import { extractKeywords } from "../utils/keywords.js";
 import {
+  analyzeMemoryAttribution,
   parseMemorySubject,
   planMemoryActions
 } from "../utils/memory-format.js";
@@ -29,9 +30,38 @@ Extract only:
 - Ongoing commitments or projects.
 
 Subject rules:
-- "subject" is who the memory is about: "user" for the user,
+- Every memory must include a non-empty "subject".
+- "subject" is who that specific fact is about: "user" for the user,
   or a short label such as "user's sister" or "friend Rahul".
+- Attribute every clause independently. A message that begins with "I"
+  can still contain facts about other people.
+- If one message contains facts about multiple people, return one memory
+  item per distinct subject and fact, up to the 3-item limit.
+- Never stop after extracting only the user's fact.
+- Never assign all facts to the user merely because the message begins with "I".
 - Never record a fact about another person as a fact about the user.
+- Keep content neutral when possible, such as "Prefers Java for DSA.",
+  and put the person's identity in "subject".
+- Use the person's actual name when known. Use a relationship label such as
+  "user's sister" only when no name is known; do not invent relationships.
+- If the subject is unclear or ambiguous, omit that memory.
+
+Few-shot examples:
+Input: "I prefer C++. My friend Rahul prefers Java."
+Output: {"memories":[
+  {"action":"add","replaces_id":null,"subject":"user","memory_type":"preference","content":"Prefers C++ for DSA.","duration":"permanent","expires_in_days":null,"confidence":0.97,"importance":4},
+  {"action":"add","replaces_id":null,"subject":"friend Rahul","memory_type":"preference","content":"Prefers Java for DSA.","duration":"permanent","expires_in_days":null,"confidence":0.97,"importance":4}
+]}
+Input: "I prefer Node.js for backend development. Rahul prefers Python."
+Output: {"memories":[
+  {"action":"add","replaces_id":null,"subject":"user","memory_type":"preference","content":"Prefers Node.js for backend development.","duration":"permanent","expires_in_days":null,"confidence":0.97,"importance":4},
+  {"action":"add","replaces_id":null,"subject":"Rahul","memory_type":"preference","content":"Prefers Python for backend development.","duration":"permanent","expires_in_days":null,"confidence":0.97,"importance":4}
+]}
+Input: "I prefer Java. My sister prefers Python."
+Output: {"memories":[
+  {"action":"add","replaces_id":null,"subject":"user","memory_type":"preference","content":"Prefers Java.","duration":"permanent","expires_in_days":null,"confidence":0.97,"importance":4},
+  {"action":"add","replaces_id":null,"subject":"user's sister","memory_type":"preference","content":"Prefers Python.","duration":"permanent","expires_in_days":null,"confidence":0.97,"importance":4}
+]}
 
 Duration rules:
 - "permanent" for stable facts and long-term preferences.
@@ -41,6 +71,7 @@ Duration rules:
 Update rules:
 - If the message changes or contradicts an existing memory with the same
   subject and type, use action "update" and set "replaces_id" to that id.
+- Use "update" only when replaces_id is one of the existing related memory ids.
 - Only update when the user clearly states a lasting change.
 - If the information is already saved, use action "none".
 - Otherwise use action "add" with "replaces_id" null.
@@ -118,13 +149,19 @@ export async function extractAndSaveMemories(
     return [];
   }
 
+  let plan;
+
   try {
     const [relatedMemories, existingMemories] = await Promise.all([
-      getRelevantMemories(userId, extractKeywords(message), 30),
+      getRelevantMemories(userId, extractKeywords(message), 100),
       getUserMemories(userId, 100)
     ]);
 
-    const candidates = relatedMemories.slice(0, CANDIDATE_LIMIT);
+    const candidates = relatedMemories
+      .filter((memory) => !analyzeMemoryAttribution(memory.content).ambiguous)
+      .slice(0, CANDIDATE_LIMIT);
+    const attributableExisting = existingMemories
+      .filter((memory) => !analyzeMemoryAttribution(memory.content).ambiguous);
 
     const result = await generateResponse([
       {
@@ -148,22 +185,28 @@ export async function extractAndSaveMemories(
       return [];
     }
 
-    const plan = planMemoryActions(
+    plan = planMemoryActions(
       parsed.memories,
       candidates,
-      existingMemories
+      attributableExisting
     );
+  } catch (error) {
+    console.error("Memory extraction failed:", error.message);
+    return [];
+  }
 
-    const savedMemories = [];
-    let supersededCount = 0;
+  const savedMemories = [];
+  let supersededCount = 0;
 
-    for (const step of plan) {
-      if (step.type === "skip") {
-        continue;
-      }
+  for (const step of plan) {
+    if (step.type === "skip") {
+      continue;
+    }
 
-      const saved = await createMemory(
+    if (step.type === "supersede") {
+      const result = await supersedeMemory(
         userId,
+        step.replacesId,
         step.memory.memoryType,
         step.memory.content,
         {
@@ -174,29 +217,40 @@ export async function extractAndSaveMemories(
         }
       );
 
-      if (!saved) {
+      if (result.status !== "superseded") {
+        console.error(`Memory supersede skipped: ${result.status}`);
         continue;
       }
 
-      savedMemories.push(saved);
-
-      if (step.type === "supersede") {
-        const deactivated = await deactivateMemory(userId, step.replacesId);
-
-        if (deactivated) {
-          supersededCount++;
-        }
-      }
+      savedMemories.push(result.memory);
+      supersededCount++;
+      continue;
     }
 
-    console.log(
-      `Memories saved: ${savedMemories.length}, superseded: ${supersededCount}, ` +
-      `skipped: ${plan.filter((step) => step.type === "skip").length}`
+    const saved = await createMemory(
+      userId,
+      step.memory.memoryType,
+      step.memory.content,
+      {
+        confidence: step.memory.confidence,
+        importance: step.memory.importance,
+        expiresAt: step.memory.expiresAt,
+        sourceMessageId
+      }
     );
 
-    return savedMemories;
-  } catch (error) {
-    console.error("Memory extraction failed:", error.message);
-    return [];
+    if (!saved) {
+      console.error("Memory insert skipped: invalid source message.");
+      continue;
+    }
+
+    savedMemories.push(saved);
   }
+
+  console.log(
+    `Memories saved: ${savedMemories.length}, superseded: ${supersededCount}, ` +
+    `skipped: ${plan.filter((step) => step.type === "skip").length}`
+  );
+
+  return savedMemories;
 }

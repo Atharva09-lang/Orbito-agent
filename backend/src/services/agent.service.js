@@ -13,13 +13,17 @@ import { getRelevantMemories } from "../repositories/memory.repository.js";
 import {
   TOKEN_BUDGETS,
   estimateMessagesTokens,
+  estimateTokens,
   fitListToBudget,
   trimMessagesToBudget,
   truncateToTokens
 } from "./token-budget.service.js";
 
 import { extractKeywords } from "../utils/keywords.js";
-import { formatMemoryContext } from "../utils/memory-format.js";
+import {
+  analyzeMemoryAttribution,
+  formatMemoryContext
+} from "../utils/memory-format.js";
 
 import {
   getUserMessagesByDate,
@@ -33,6 +37,13 @@ const HISTORICAL_MESSAGE_LIMIT = 15;
 const HISTORICAL_MESSAGE_TOKEN_CAP = 75;
 const EVIDENCE_CONTENT_CHARS = 450;
 const TIME_ZONE = "Asia/Kolkata";
+
+function isHistoricalPreference(memory) {
+  const { text } = analyzeMemoryAttribution(memory.content);
+
+  return memory.memory_type === "fact" &&
+    text.startsWith("Previous preference:");
+}
 
 const SYSTEM_PROMPT = `
 You are Orbito, a helpful AI assistant.
@@ -512,27 +523,81 @@ HISTORICAL CONTEXT RULES:
 `;
 }
 
-async function retrieveMemoryContext(userId, message, historyMessageIds = []) {
+export function selectMemoryContextCandidates(memories) {
+  const isCurrentUserPreference = (memory) => {
+    const { subject, text } = analyzeMemoryAttribution(memory.content);
+
+    return memory.memory_type === "preference" &&
+      subject === "user" &&
+      !text.startsWith("Previous preference:");
+  };
+
+  const matched = memories.filter((memory) => memory.match_count > 0);
+  const currentPreferences = matched.filter(isCurrentUserPreference);
+  const otherMatched = matched.filter(
+    (memory) => !isCurrentUserPreference(memory) && !isHistoricalPreference(memory)
+  );
+  const matchedHistory = matched.filter(isHistoricalPreference);
+  const highImportance = memories
+    .filter(
+      (memory) =>
+        memory.match_count === 0 &&
+        memory.importance >= 5 &&
+        !isHistoricalPreference(memory)
+    )
+    .slice(0, HIGH_IMPORTANCE_MEMORY_LIMIT);
+
+  return [
+    ...currentPreferences,
+    ...otherMatched,
+    ...matchedHistory,
+    ...highImportance
+  ].slice(0, MEMORY_CONTEXT_LIMIT);
+}
+
+export function fitMemoryListToBudget(memories, budget = TOKEN_BUDGETS.memories) {
+  const kept = [];
+
+  for (const memory of memories) {
+    const candidate = [...kept, memory];
+
+    if (estimateTokens(formatMemoryContext(candidate)) <= budget) {
+      kept.push(memory);
+    }
+  }
+
+  return kept;
+}
+
+export async function retrieveMemoryContext(userId, message, historyMessageIds = []) {
   try {
     const excludedSources = new Set(historyMessageIds.map(String));
-    const rows = await getRelevantMemories(userId, extractKeywords(message), 30);
+    const rows = await getRelevantMemories(userId, extractKeywords(message), 100);
 
-    const usable = rows.filter(
-      (memory) => !excludedSources.has(String(memory.source_message_id))
-    );
+    const usable = rows.filter((memory) => {
+      if (excludedSources.has(String(memory.source_message_id))) {
+        return false;
+      }
+
+      const attribution = analyzeMemoryAttribution(memory.content);
+
+      return !attribution.ambiguous &&
+        (attribution.explicit || attribution.subject === "user");
+    });
 
     const matched = usable.filter((memory) => memory.match_count > 0);
     const highImportance = usable
-      .filter((memory) => memory.match_count === 0 && memory.importance >= 5)
+      .filter(
+        (memory) =>
+          memory.match_count === 0 &&
+          memory.importance >= 5 &&
+          !isHistoricalPreference(memory)
+      )
       .slice(0, HIGH_IMPORTANCE_MEMORY_LIMIT);
 
-    const selected = [...matched, ...highImportance].slice(0, MEMORY_CONTEXT_LIMIT);
+    const selected = selectMemoryContextCandidates(usable);
 
-    const { kept } = fitListToBudget(
-      selected,
-      TOKEN_BUDGETS.memories,
-      (memory) => memory.content
-    );
+    const kept = fitMemoryListToBudget(selected, TOKEN_BUDGETS.memories);
 
     console.log(
       `[Memories] relevant: ${matched.length}, high importance: ${highImportance.length}, sent: ${kept.length}`
