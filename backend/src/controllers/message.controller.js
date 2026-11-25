@@ -1,7 +1,9 @@
 
 import {
   createMessage,
-  getConversationMessages
+  getConversationMessages,
+  getRecentConversationMessages,
+  markMessageFailed
 } from "../repositories/message.repository.js";
 
 import { runAgent } from "../services/agent.service.js";
@@ -18,7 +20,40 @@ function isTokenLimitError(error) {
   return /rate_limit|context_length|request_too_large|tokens? per|token limit/i.test(details);
 }
 
+const HISTORY_MESSAGE_LIMIT = 50;
+const HISTORY_TOKEN_BUDGET = 3000;
+
+function estimateTokens(text) {
+  return Math.ceil(String(text ?? "").length / 4) + 4;
+}
+
+function trimHistoryToTokenBudget(messages, budget) {
+  const kept = [];
+  let usedTokens = 0;
+
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const cost = estimateTokens(messages[index].content);
+
+    if (kept.length > 0 && usedTokens + cost > budget) {
+      break;
+    }
+
+    kept.unshift(messages[index]);
+    usedTokens += cost;
+  }
+
+  console.log(
+    `[History] Sending ${kept.length} of ${messages.length} messages ` +
+    `(~${usedTokens} estimated tokens, budget ${budget})`
+  );
+
+  return kept;
+}
+
 export async function createMessageController(req, res) {
+  let userMessage = null;
+  let assistantMessage = null;
+
   try {
     const { content, role = "user", metadata = {} } = req.body;
     const conversationId = req.params.conversationId;
@@ -38,7 +73,7 @@ export async function createMessageController(req, res) {
     }
 
 
-    const userMessage = await createMessage(
+    userMessage = await createMessage(
       req.user.id,
       conversationId,
       "user",
@@ -58,15 +93,19 @@ export async function createMessageController(req, res) {
         content.trim(),
         userMessage.id
     );
-    const history = await getConversationMessages(
+    const history = await getRecentConversationMessages(
       req.user.id,
-      conversationId
+      conversationId,
+      HISTORY_MESSAGE_LIMIT
     );
 
-    const messages = history.map(({ role, content }) => ({
-      role,
-      content
-    }));
+    const messages = trimHistoryToTokenBudget(
+      history.map(({ role, content }) => ({
+        role,
+        content
+      })),
+      HISTORY_TOKEN_BUDGET
+    );
 
   
     const aiResponse = await runAgent(messages, {
@@ -76,7 +115,7 @@ export async function createMessageController(req, res) {
     });
 
 
-    const assistantMessage = await createMessage(
+    assistantMessage = await createMessage(
       req.user.id,
       conversationId,
       "assistant",
@@ -98,6 +137,14 @@ export async function createMessageController(req, res) {
 
   } catch (error) {
     console.error("Message controller error:", error);
+
+    if (userMessage && !assistantMessage) {
+      try {
+        await markMessageFailed(req.user.id, userMessage.id);
+      } catch (markError) {
+        console.error("Failed to mark message as failed:", markError.message);
+      }
+    }
 
     if (isTokenLimitError(error)) {
       return res.status(429).json({

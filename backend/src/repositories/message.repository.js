@@ -250,3 +250,60 @@ export async function getUserMessagesByTopic(
 
   return rows;
 }
+
+
+export async function getRecentConversationMessages(
+  userId,
+  conversationId,
+  limit = 50
+) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new Error("Invalid result limit");
+  }
+
+  const query = `
+    SELECT id, role, content, metadata, created_at
+    FROM (
+      SELECT
+        m.id,
+        m.role,
+        m.content,
+        m.metadata,
+        m.created_at
+      FROM messages m
+      INNER JOIN conversations c
+        ON c.id = m.conversation_id
+      WHERE c.id = $1
+        AND c.user_id = $2
+        AND COALESCE(m.metadata->>'status', '') <> 'failed'
+      ORDER BY m.created_at DESC
+      LIMIT $3
+    ) recent
+    ORDER BY created_at ASC
+  `;
+
+  const { rows } = await pool.query(query, [
+    conversationId,
+    userId,
+    limit
+  ]);
+
+  return rows;
+}
+
+
+export async function markMessageFailed(userId, messageId) {
+  const query = `
+    UPDATE messages m
+    SET metadata = m.metadata || '{"status": "failed"}'::jsonb
+    FROM conversations c
+    WHERE m.id = $2
+      AND c.id = m.conversation_id
+      AND c.user_id = $1
+    RETURNING m.id
+  `;
+
+  const { rows } = await pool.query(query, [userId, messageId]);
+
+  return rows.length > 0;
+}
