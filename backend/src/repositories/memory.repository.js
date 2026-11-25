@@ -102,3 +102,34 @@ export async function deactivateMemory(userId, memoryId) {
 }
 
 
+export async function getRelevantMemories(userId, keywords = [], limit = 30) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new Error("Invalid result limit");
+  }
+
+  const query = `
+    SELECT
+      *,
+      (
+        SELECT COUNT(*)
+        FROM unnest($2::text[]) AS k(word)
+        WHERE (
+          ' ' || regexp_replace(lower(content), '[^a-z0-9]+', ' ', 'g') || ' '
+        ) LIKE '% ' || k.word || ' %'
+      )::int AS match_count
+    FROM memories
+    WHERE user_id = $1
+      AND is_active = TRUE
+      AND (expires_at IS NULL OR expires_at > NOW())
+    ORDER BY
+      match_count DESC,
+      importance DESC,
+      confidence DESC,
+      updated_at DESC
+    LIMIT $3
+  `;
+
+  const { rows } = await pool.query(query, [userId, keywords, limit]);
+
+  return rows;
+}

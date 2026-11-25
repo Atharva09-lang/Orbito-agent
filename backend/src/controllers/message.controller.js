@@ -8,6 +8,14 @@ import {
 
 import { runAgent } from "../services/agent.service.js";
 import { extractAndSaveMemories } from "../services/memory.service.js";
+import {
+  getConversationSummary,
+  updateConversationSummary
+} from "../services/conversation-summary.service.js";
+import {
+  TOKEN_BUDGETS,
+  trimMessagesToBudget
+} from "../services/token-budget.service.js";
 
 
 function isTokenLimitError(error) {
@@ -21,33 +29,30 @@ function isTokenLimitError(error) {
 }
 
 const HISTORY_MESSAGE_LIMIT = 50;
-const HISTORY_TOKEN_BUDGET = 3000;
 
-function estimateTokens(text) {
-  return Math.ceil(String(text ?? "").length / 4) + 4;
-}
+function selectHistory(history, summary) {
+  const coversUntil = summary?.coversUntil
+    ? new Date(summary.coversUntil).getTime()
+    : null;
 
-function trimHistoryToTokenBudget(messages, budget) {
-  const kept = [];
-  let usedTokens = 0;
+  const unsummarized = coversUntil === null
+    ? history
+    : history.filter(
+      (message) => new Date(message.created_at).getTime() > coversUntil
+    );
 
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const cost = estimateTokens(messages[index].content);
-
-    if (kept.length > 0 && usedTokens + cost > budget) {
-      break;
-    }
-
-    kept.unshift(messages[index]);
-    usedTokens += cost;
-  }
-
-  console.log(
-    `[History] Sending ${kept.length} of ${messages.length} messages ` +
-    `(~${usedTokens} estimated tokens, budget ${budget})`
+  const { kept, dropped, usedTokens } = trimMessagesToBudget(
+    unsummarized,
+    TOKEN_BUDGETS.history
   );
 
-  return kept;
+  console.log(
+    `[History] Sending ${kept.length} of ${history.length} messages ` +
+    `(~${usedTokens} estimated tokens, budget ${TOKEN_BUDGETS.history}, ` +
+    `summary: ${summary ? "yes" : "no"}, newly dropped: ${dropped.length})`
+  );
+
+  return { kept, dropped };
 }
 
 export async function createMessageController(req, res) {
@@ -93,25 +98,28 @@ export async function createMessageController(req, res) {
         content.trim(),
         userMessage.id
     );
-    const history = await getRecentConversationMessages(
-      req.user.id,
-      conversationId,
-      HISTORY_MESSAGE_LIMIT
-    );
+    const [history, summary] = await Promise.all([
+      getRecentConversationMessages(
+        req.user.id,
+        conversationId,
+        HISTORY_MESSAGE_LIMIT
+      ),
+      getConversationSummary(req.user.id, conversationId)
+    ]);
 
-    const messages = trimHistoryToTokenBudget(
-      history.map(({ role, content }) => ({
-        role,
-        content
-      })),
-      HISTORY_TOKEN_BUDGET
-    );
+    const { kept, dropped } = selectHistory(history, summary);
 
-  
+    const messages = kept.map(({ role, content }) => ({
+      role,
+      content
+    }));
+
     const aiResponse = await runAgent(messages, {
       userId: req.user.id,
       conversationId,
-      messageId: userMessage.id
+      messageId: userMessage.id,
+      historyMessageIds: kept.map((message) => message.id),
+      conversationSummary: summary?.content ?? null
     });
 
 
@@ -126,7 +134,7 @@ export async function createMessageController(req, res) {
       }
     );
 
-    return res.status(201).json({
+    res.status(201).json({
       success: true,
       message: "AI response generated successfully.",
       data: {
@@ -134,6 +142,19 @@ export async function createMessageController(req, res) {
         assistantMessage
       }
     });
+
+    if (dropped.length >= TOKEN_BUDGETS.summaryMinMessages) {
+      updateConversationSummary(
+        req.user.id,
+        conversationId,
+        summary,
+        dropped
+      ).catch((summaryError) => {
+        console.error("Summary update failed:", summaryError.message);
+      });
+    }
+
+    return;
 
   } catch (error) {
     console.error("Message controller error:", error);

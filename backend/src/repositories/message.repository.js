@@ -1,5 +1,6 @@
 
 import pool from "../config/database.js";
+import { extractKeywords } from "../utils/keywords.js";
 
 // Save a new message
 export async function createMessage(
@@ -92,6 +93,7 @@ export async function getConversationMessages(
     INNER JOIN conversations c
       ON c.id = m.conversation_id
     WHERE c.id = $1 AND c.user_id = $2
+      AND COALESCE(m.metadata->>'type', '') <> 'summary'
     ORDER BY m.created_at ASC
     LIMIT $3 OFFSET $4
   `;
@@ -112,7 +114,8 @@ export async function getUserMessagesByDate(
   userId,
   startDate,
   endDate,
-  limit = 100
+  limit = 100,
+  options = {}
 ) {
   const start = new Date(startDate);
   const end = new Date(endDate);
@@ -146,6 +149,9 @@ export async function getUserMessagesByDate(
     WHERE c.user_id = $1
       AND m.created_at >= $2::timestamptz
       AND m.created_at < $3::timestamptz
+      AND ($5::uuid IS NULL OR m.conversation_id <> $5::uuid)
+      AND COALESCE(m.metadata->>'status', '') <> 'failed'
+      AND COALESCE(m.metadata->>'type', '') <> 'summary'
     ORDER BY m.created_at ASC
     LIMIT $4
   `;
@@ -154,7 +160,8 @@ export async function getUserMessagesByDate(
     userId,
     startDate,
     endDate,
-    limit
+    limit,
+    options.excludeConversationId ?? null
   ]);
 
   return rows;
@@ -165,7 +172,8 @@ export async function getUserMessagesByDate(
 export async function getUserMessagesByTopic(
   userId,
   searchQuery,
-  limit = 30
+  limit = 30,
+  options = {}
 ) {
   if (
     typeof searchQuery !== "string" ||
@@ -178,21 +186,7 @@ export async function getUserMessagesByTopic(
     throw new Error("Invalid result limit");
   }
 
-  const stopWords = new Set([
-    "what", "when", "where", "which", "who",
-    "have", "has", "had", "did", "does",
-    "about", "with", "from", "that", "this",
-    "were", "was", "are", "the", "and",
-    "for", "you", "your", "our", "previously",
-    "discuss", "discussed", "talk", "talked",
-    "remember", "recall", "tell", "me"
-  ]);
-
-  const keywords = [
-    ...new Set(
-      searchQuery.toLowerCase().match(/[a-z0-9]{3,}/g) || []
-    )
-  ].filter((word) => !stopWords.has(word));
+  const keywords = extractKeywords(searchQuery);
 
   if (keywords.length === 0) {
     throw new Error("No meaningful search keywords found");
@@ -225,6 +219,9 @@ export async function getUserMessagesByTopic(
       ON c.id = m.conversation_id
 
     WHERE c.user_id = $1
+      AND ($4::uuid IS NULL OR m.conversation_id <> $4::uuid)
+      AND COALESCE(m.metadata->>'status', '') <> 'failed'
+      AND COALESCE(m.metadata->>'type', '') <> 'summary'
       AND EXISTS (
         SELECT 1
         FROM unnest($2::text[]) AS k(word)
@@ -245,7 +242,8 @@ export async function getUserMessagesByTopic(
   const { rows } = await pool.query(query, [
     userId,
     keywords,
-    limit
+    limit,
+    options.excludeConversationId ?? null
   ]);
 
   return rows;
@@ -276,6 +274,7 @@ export async function getRecentConversationMessages(
       WHERE c.id = $1
         AND c.user_id = $2
         AND COALESCE(m.metadata->>'status', '') <> 'failed'
+        AND COALESCE(m.metadata->>'type', '') <> 'summary'
       ORDER BY m.created_at DESC
       LIMIT $3
     ) recent
@@ -306,4 +305,24 @@ export async function markMessageFailed(userId, messageId) {
   const { rows } = await pool.query(query, [userId, messageId]);
 
   return rows.length > 0;
+}
+
+
+export async function getLatestConversationSummary(userId, conversationId) {
+  const query = `
+    SELECT m.id, m.content, m.metadata, m.created_at
+    FROM messages m
+    INNER JOIN conversations c
+      ON c.id = m.conversation_id
+    WHERE c.id = $1
+      AND c.user_id = $2
+      AND m.role = 'system'
+      AND m.metadata->>'type' = 'summary'
+    ORDER BY m.created_at DESC
+    LIMIT 1
+  `;
+
+  const { rows } = await pool.query(query, [conversationId, userId]);
+
+  return rows[0] || null;
 }

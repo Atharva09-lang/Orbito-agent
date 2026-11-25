@@ -8,7 +8,18 @@ import {
 
 import { createToolLog } from "../repositories/tool-log.repository.js";
 
-import { getUserMemories } from "../repositories/memory.repository.js";
+import { getRelevantMemories } from "../repositories/memory.repository.js";
+
+import {
+  TOKEN_BUDGETS,
+  estimateMessagesTokens,
+  fitListToBudget,
+  trimMessagesToBudget,
+  truncateToTokens
+} from "./token-budget.service.js";
+
+import { extractKeywords } from "../utils/keywords.js";
+import { formatMemoryContext } from "../utils/memory-format.js";
 
 import {
   getUserMessagesByDate,
@@ -16,6 +27,11 @@ import {
 } from "../repositories/message.repository.js";
 
 const MAX_TOOL_CALLS = 1;
+const MEMORY_CONTEXT_LIMIT = 8;
+const HIGH_IMPORTANCE_MEMORY_LIMIT = 3;
+const HISTORICAL_MESSAGE_LIMIT = 15;
+const HISTORICAL_MESSAGE_TOKEN_CAP = 75;
+const EVIDENCE_CONTENT_CHARS = 450;
 const TIME_ZONE = "Asia/Kolkata";
 
 const SYSTEM_PROMPT = `
@@ -380,7 +396,17 @@ function mergeHistoricalMessages(...groups) {
   );
 }
 
-async function retrieveHistoricalContext(userId, message) {
+function formatHistoricalLine(item) {
+  const date = new Date(item.created_at);
+  const dateText = Number.isFinite(date.getTime())
+    ? date.toISOString().slice(0, 16).replace("T", " ")
+    : "unknown date";
+
+  return `[${dateText} UTC | ${item.conversation_title || "Untitled"} | ${item.role}] ` +
+    truncateToTokens(item.content, HISTORICAL_MESSAGE_TOKEN_CAP);
+}
+
+async function retrieveHistoricalContext(userId, message, excludeConversationId = null) {
   const dateRange = getDateRange(message);
 
   if (!hasHistoricalIntent(message, dateRange)) {
@@ -391,96 +417,92 @@ async function retrieveHistoricalContext(userId, message) {
     return "";
   }
 
-  try {
-    const extractedTopic = extractHistoricalTopic(message);
+  const extractedTopic = extractHistoricalTopic(message);
+  const options = { excludeConversationId };
 
-    console.log("--------------------------------");
-    console.log("Historical query:", message);
-    console.log("Date range:", dateRange);
-    console.log("Extracted topic:", extractedTopic);
+  const [dateResult, topicResult] = await Promise.allSettled([
+    dateRange
+      ? getUserMessagesByDate(
+        userId,
+        dateRange.startDate,
+        dateRange.endDate,
+        100,
+        options
+      )
+      : Promise.resolve([]),
+    extractedTopic && extractKeywords(extractedTopic).length > 0
+      ? getUserMessagesByTopic(userId, extractedTopic, 30, options)
+      : Promise.resolve([])
+  ]);
 
-    const retrievalTasks = [];
-
-    // Existing date-based repository method.
-    if (dateRange) {
-      retrievalTasks.push(
-        getUserMessagesByDate(
-          userId,
-          dateRange.startDate,
-          dateRange.endDate,
-          100
-        )
-      );
+  for (const result of [dateResult, topicResult]) {
+    if (result.status === "rejected") {
+      console.error("Historical retrieval failed:", result.reason?.message);
     }
+  }
 
-    // Existing topic-based repository method.
-    if (extractedTopic) {
-      retrievalTasks.push(
-        getUserMessagesByTopic(
-          userId,
-          extractedTopic,
-          30
-        )
-      );
-    }
+  if (dateResult.status === "rejected" && topicResult.status === "rejected") {
+    return `
+Historical conversation retrieval failed.
+Do not pretend that historical information was retrieved.
+`;
+  }
 
-    const retrievalResults = await Promise.all(
-      retrievalTasks
+  const dateMessages = dateResult.status === "fulfilled" ? dateResult.value : [];
+  let topicMessages = topicResult.status === "fulfilled" ? topicResult.value : [];
+
+  if (dateRange && extractedTopic) {
+    topicMessages = topicMessages.filter((item) =>
+      isWithinDateRange(item, dateRange)
     );
+  }
 
-    let dateMessages = [];
-    let topicMessages = [];
+  const seen = new Set();
+  const candidates = [...topicMessages, ...[...dateMessages].reverse()]
+    .filter((item) => {
+      const key = String(item.id);
 
-    let resultIndex = 0;
+      if (seen.has(key)) {
+        return false;
+      }
 
-    if (dateRange) {
-      dateMessages = retrievalResults[resultIndex] || [];
-      resultIndex++;
-    }
+      seen.add(key);
+      return true;
+    })
+    .slice(0, HISTORICAL_MESSAGE_LIMIT);
 
-    if (extractedTopic) {
-      topicMessages = retrievalResults[resultIndex] || [];
-    }
+  const { kept, usedTokens } = fitListToBudget(
+    candidates,
+    TOKEN_BUDGETS.historical,
+    formatHistoricalLine
+  );
 
-    // Restrict topic results to the requested date when both exist.
-    if (dateRange && extractedTopic) {
-      topicMessages = topicMessages.filter((item) =>
-        isWithinDateRange(item, dateRange)
-      );
-    }
+  const historicalMessages = mergeHistoricalMessages(kept);
 
-    const historicalMessages = mergeHistoricalMessages(
-      dateMessages,
-      topicMessages
-    );
+  console.log(
+    `[Historical] date: ${dateMessages.length}, topic: ${topicMessages.length}, ` +
+    `sent: ${historicalMessages.length} (~${usedTokens} estimated tokens), ` +
+    `topic: ${extractedTopic ?? "none"}`
+  );
 
-    console.log("Date messages:", dateMessages.length);
-    console.log("Topic messages:", topicMessages.length);
-    console.log("Final unique messages:", historicalMessages.length);
-    console.log("--------------------------------");
-
-    if (historicalMessages.length === 0) {
-      return `
+  if (historicalMessages.length === 0) {
+    return `
 Historical conversation retrieval was attempted,
-but no matching messages were found.
+but no matching messages were found in other conversations.
 
+The current conversation history may still contain the answer.
 Do not invent or assume previous conversations.
 Tell the user when the required historical information is unavailable.
 `;
-    }
+  }
 
-    return `
-Retrieved historical conversation messages:
+  return `
+Retrieved messages from other conversations (shortened):
 
-${historicalMessages.map((item) => `
-Date: ${item.created_at}
-Conversation: ${item.conversation_title || "Untitled"}
-Role: ${item.role}
-Message: ${item.content}
-`).join("\n")}
+${historicalMessages.map(formatHistoricalLine).join("\n")}
 
 HISTORICAL CONTEXT RULES:
-- These messages are retrieved from previous conversations.
+- These messages are retrieved from previous conversations and may be shortened.
 - Distinguish user statements from assistant suggestions.
 - Use the original dates when discussing past events.
 - Do not assume a previous assistant answer was correct.
@@ -488,17 +510,120 @@ HISTORICAL CONTEXT RULES:
 - If the user asks whether something has changed, compare
   historical information with current search evidence.
 `;
-  } catch (error) {
-    console.error(
-      "Historical retrieval failed:",
-      error.message
+}
+
+async function retrieveMemoryContext(userId, message, historyMessageIds = []) {
+  try {
+    const excludedSources = new Set(historyMessageIds.map(String));
+    const rows = await getRelevantMemories(userId, extractKeywords(message), 30);
+
+    const usable = rows.filter(
+      (memory) => !excludedSources.has(String(memory.source_message_id))
     );
 
-    return `
-Historical conversation retrieval failed.
-Do not pretend that historical information was retrieved.
-`;
+    const matched = usable.filter((memory) => memory.match_count > 0);
+    const highImportance = usable
+      .filter((memory) => memory.match_count === 0 && memory.importance >= 5)
+      .slice(0, HIGH_IMPORTANCE_MEMORY_LIMIT);
+
+    const selected = [...matched, ...highImportance].slice(0, MEMORY_CONTEXT_LIMIT);
+
+    const { kept } = fitListToBudget(
+      selected,
+      TOKEN_BUDGETS.memories,
+      (memory) => memory.content
+    );
+
+    console.log(
+      `[Memories] relevant: ${matched.length}, high importance: ${highImportance.length}, sent: ${kept.length}`
+    );
+
+    return formatMemoryContext(kept);
+  } catch (error) {
+    console.error("Memory retrieval failed:", error.message);
+    return "";
   }
+}
+
+function buildSummaryContext(summary) {
+  if (!summary) {
+    return "";
+  }
+
+  return `
+Summary of earlier messages in this conversation (data, may be incomplete):
+${summary}
+`;
+}
+
+function fitRequestToBudget(purpose, basePrompt, sections, messages, tools = [], trailing = []) {
+  const current = { ...sections };
+  const history = [...messages];
+  const removableSections = ["historical", "memory", "summary"];
+  const removed = [];
+  let droppedMessages = 0;
+
+  const build = () => [
+    {
+      role: "system",
+      content: basePrompt + current.summary + current.memory + current.historical
+    },
+    ...history,
+    ...trailing
+  ];
+
+  let built = build();
+
+  while (estimateMessagesTokens(built, tools) > TOKEN_BUDGETS.request) {
+    if (history.length > 1) {
+      history.shift();
+      droppedMessages++;
+    } else {
+      const key = removableSections.find((name) => current[name]);
+
+      if (!key) {
+        break;
+      }
+
+      current[key] = "";
+      removed.push(key);
+    }
+
+    built = build();
+  }
+
+  console.log(
+    `[Budget] ${purpose}: ~${estimateMessagesTokens(built, tools)} estimated prompt tokens ` +
+    `(budget ${TOKEN_BUDGETS.request})` +
+    (droppedMessages > 0 ? `, dropped ${droppedMessages} older messages` : "") +
+    (removed.length > 0 ? `, removed ${removed.join(", ")}` : "")
+  );
+
+  return built;
+}
+
+function fitEvidence(collectedToolResults) {
+  return collectedToolResults.map((entry) => {
+    const results = entry.result?.results;
+
+    if (!Array.isArray(results)) {
+      return entry;
+    }
+
+    const { kept } = fitListToBudget(
+      results,
+      TOKEN_BUDGETS.evidence,
+      (item) => JSON.stringify(item)
+    );
+
+    return {
+      ...entry,
+      result: {
+        ...entry.result,
+        results: kept
+      }
+    };
+  });
 }
 
 function compactToolResult(toolResult) {
@@ -513,20 +638,12 @@ function compactToolResult(toolResult) {
     isOfficial: item.isOfficial ?? false,
     matchedBrand: item.matchedBrand || null,
     publishedDate: item.publishedDate || null,
-    content: (item.content || "").slice(0, 700)
+    content: (item.content || "").slice(0, EVIDENCE_CONTENT_CHARS)
   }));
 
   return {
     query: toolResult.query,
-    results,
-    sources: results.map((item) => ({
-      title: item.title,
-      url: item.url,
-      domain: item.domain,
-      isOfficial: item.isOfficial,
-      matchedBrand: item.matchedBrand,
-      publishedDate: item.publishedDate
-    }))
+    results
   };
 }
 
@@ -657,49 +774,34 @@ export async function runAgent(messages, context = {}) {
   let memoryContext = "";
   let historicalContext = "";
 
-  if (context.userId) {
-    try {
-      const memories = await getUserMemories(
+  if (context.userId && originalMessage) {
+    [memoryContext, historicalContext] = await Promise.all([
+      retrieveMemoryContext(
         context.userId,
-        20
-      );
-
-      if (memories.length > 0) {
-        memoryContext = `
-Saved user context:
-
-${memories
-  .map((memory) => `- [${memory.memory_type}] ${memory.content}`)
-  .join("\n")}
-`;
-      }
-    } catch (error) {
-      console.error(
-        "Memory retrieval failed:",
-        error.message
-      );
-    }
-
-    if (originalMessage) {
-      historicalContext = await retrieveHistoricalContext(
+        originalMessage,
+        context.historyMessageIds ?? []
+      ),
+      retrieveHistoricalContext(
         context.userId,
-        originalMessage
-      );
-    }
+        originalMessage,
+        context.conversationId ?? null
+      )
+    ]);
   }
 
-  const systemContext =
-    SYSTEM_PROMPT +
-    memoryContext +
-    historicalContext;
+  const contextSections = {
+    summary: buildSummaryContext(context.conversationSummary),
+    memory: memoryContext,
+    historical: historicalContext
+  };
 
-  const workingMessages = [
-    {
-      role: "system",
-      content: systemContext
-    },
-    ...messages
-  ];
+  const workingMessages = fitRequestToBudget(
+    "agent_response",
+    SYSTEM_PROMPT,
+    contextSections,
+    messages,
+    availableTools
+  );
 
   const collectedToolResults = [];
   const usage = [];
@@ -712,7 +814,10 @@ ${memories
     const result = await generateResponse(
       workingMessages,
       availableTools,
-      { purpose: "agent_response" }
+      {
+        purpose: "agent_response",
+        maxCompletionTokens: TOKEN_BUDGETS.completion
+      }
     );
 
     initialResult = result;
@@ -793,30 +898,30 @@ Do not invent information that the evidence does not establish.
 
 Search evidence:
 
-${JSON.stringify(collectedToolResults, null, 2)}
+${JSON.stringify(fitEvidence(collectedToolResults))}
 
 Answer the original user question using this evidence.
 Cover every requested provider or product.
 Clearly disclose missing or conflicting evidence.
 `;
 
-  const finalMessages = [
-    {
-      role: "system",
-      content:
-        FINAL_SYSTEM_PROMPT +
-        memoryContext +
-        historicalContext
-    },
-    ...messages,
-    {
-      role: "user",
-      content: evidenceMessage
-    }
-  ];
+  const finalMessages = fitRequestToBudget(
+    "web_search_final_response",
+    FINAL_SYSTEM_PROMPT,
+    contextSections,
+    trimMessagesToBudget(messages, TOKEN_BUDGETS.finalHistory).kept,
+    [],
+    [
+      {
+        role: "user",
+        content: evidenceMessage
+      }
+    ]
+  );
 
   const finalResult = await generateResponse(finalMessages, [], {
-    purpose: "web_search_final_response"
+    purpose: "web_search_final_response",
+    maxCompletionTokens: TOKEN_BUDGETS.completion
   });
 
   if (finalResult.usage) {
