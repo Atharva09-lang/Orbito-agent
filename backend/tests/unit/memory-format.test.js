@@ -521,6 +521,39 @@ test("embedded pronouns and mixed first-person attribution are rejected", () => 
   );
 });
 
+test("mixed subjects across clauses are rejected while simple statements remain attributable", () => {
+  const ambiguous = [
+    "I use C++, but Rahul uses Java.",
+    "I use C++, Rahul uses Java.",
+    "I prefer Node.js and Rahul prefers Java.",
+    "Rahul uses Java and Anita uses Python.",
+    "Rahul and Anita use Java.",
+    "My friend Rahul uses Python and Anita uses Java.",
+    "[about: user] I use C++, but Rahul uses Java."
+  ];
+
+  for (const content of ambiguous) {
+    assert.equal(analyzeMemoryAttribution(content).ambiguous, true, content);
+    assert.equal(validateMemoryAttribution(content, "user").valid, false, content);
+  }
+
+  const valid = [
+    ["I prefer Node.js.", "user"],
+    ["Rahul prefers Java.", "rahul"],
+    ["My friend Rahul uses Python.", "rahul"],
+    ["My brother works with Java.", "user's brother"],
+    ["My backend preference is Node.js.", "user"],
+    ["My DSA preference is Node.js.", "user"],
+    ["Me and my team use PostgreSQL.", "user"]
+  ];
+
+  for (const [content, subject] of valid) {
+    const analysis = analyzeMemoryAttribution(content);
+    assert.equal(analysis.subject, subject, content);
+    assert.equal(analysis.ambiguous, false, content);
+  }
+});
+
 test("pronoun-only statements cannot inherit a name from earlier messages", () => {
   const messages = ["Rahul prefers Java.", "He prefers Python."];
   const plan = planMemoryActions(messages.map((content, index) => extracted({

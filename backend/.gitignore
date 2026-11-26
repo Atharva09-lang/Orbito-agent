@@ -9,6 +9,9 @@ node_modules/
 
 # Authentication cookies
 cookies.txt
+cookies.integration.local
+phase1-identities.integration.local.json
+phase2-identities.integration.local.json
 
 # Logs
 logs/

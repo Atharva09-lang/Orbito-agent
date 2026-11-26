@@ -1,6 +1,7 @@
 import pg from "pg";
-import dotenv from "dotenv";
-dotenv.config();
+import "./environment.js";
+import { validateIntegrationEnvironment } from "./integration-env.js";
+validateIntegrationEnvironment();
 const { Pool } = pg;
 const isProduction = process.env.NODE_ENV === "production";
 const pool = new Pool({

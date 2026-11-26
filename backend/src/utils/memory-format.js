@@ -45,7 +45,8 @@ const NON_NAME_STARTS = new Set([
   "later", "today", "yesterday", "hopefully", "maybe", "perhaps", "definitely",
   "always", "never", "often", "sometimes", "still", "already", "finally", "really",
   "additionally", "personally", "primarily", "backend", "frontend", "programming",
-  "java", "python", "node", "javascript", "typescript", "react", "rust", "golang"
+  "java", "python", "node", "javascript", "typescript", "react", "rust", "golang",
+  "dsa", "and", "or", "but", "while", "whereas"
 ]);
 
 export function normalizeSubject(subject) {
@@ -131,6 +132,62 @@ function matchStandaloneName(text) {
   return match[1];
 }
 
+function matchCoordinatedNames(text) {
+  const match = text.match(
+    /^([a-z][a-z'’-]*)\s+(?:and|or)\s+([a-z][a-z'’-]*)\s+(.+)$/i
+  );
+
+  if (!match) {
+    return null;
+  }
+
+  const verb = match[3].trim().split(/\s+/)[0];
+
+  if (
+    !isNameCandidate(match[1]) ||
+    !isNameCandidate(match[2]) ||
+    !isVerbLike(verb)
+  ) {
+    return null;
+  }
+
+  return [normalizeSubject(match[1]), normalizeSubject(match[2])];
+}
+
+function hasMixedClauseAttribution(text) {
+  if (matchCoordinatedNames(text)?.length > 1) {
+    return true;
+  }
+
+  const clauses = text
+    .split(/(?<=[.!?;])(?:\s+|$)|,\s*|\b(?:but|and|or|while|whereas)\b/gi)
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+  const namedSubjects = new Set();
+  let hasFirstPerson = false;
+
+  for (const clause of clauses) {
+    const clauseHasFirstPerson =
+      FIRST_PERSON_ANYWHERE.test(clause) || USER_STATEMENT_ANYWHERE.test(clause);
+
+    if (clauseHasFirstPerson) {
+      hasFirstPerson = true;
+    }
+
+    if (matchCoordinatedNames(clause)?.length > 1) {
+      return true;
+    }
+
+    const named = clauseHasFirstPerson ? null : matchNamedPerson(clause);
+
+    if (named && normalizeSubject(named) !== "user") {
+      namedSubjects.add(normalizeSubject(named));
+    }
+  }
+
+  return (hasFirstPerson && namedSubjects.size > 0) || namedSubjects.size > 1;
+}
+
 function detectThirdPersonAttribution(content) {
   const text = String(content ?? "").trim();
   const relationship = text.match(RELATIONSHIP_START) || text.match(RELATIONSHIP_MENTION);
@@ -139,6 +196,11 @@ function detectThirdPersonAttribution(content) {
   if (relationship) {
     const before = text.slice(0, relationshipIndex);
     const remainder = text.slice(relationshipIndex + relationship[0].length).trim();
+
+    if (hasMixedClauseAttribution(remainder)) {
+      return { isThirdPerson: true, subject: null };
+    }
+
     const named = matchNamedPerson(remainder) || matchStandaloneName(remainder);
     const label = relationship[1].toLowerCase();
     const subject = named || `user's ${label}`;
@@ -155,6 +217,10 @@ function detectThirdPersonAttribution(content) {
   }
 
   if (AMBIGUOUS_PRONOUN.test(text)) {
+    return { isThirdPerson: true, subject: null };
+  }
+
+  if (hasMixedClauseAttribution(text)) {
     return { isThirdPerson: true, subject: null };
   }
 

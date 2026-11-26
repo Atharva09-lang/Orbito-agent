@@ -1,5 +1,5 @@
 
-import groq from "../config/groq.js";
+import { getGroqClient } from "../config/groq.js";
 import { estimateMessagesTokens } from "./token-budget.service.js";
 
 const MODEL = "openai/gpt-oss-120b";
@@ -195,6 +195,8 @@ export async function generateResponse(messages, tools = [], options = {}) {
   let rawResponse;
 
   try {
+    const groq = getGroqClient();
+
     ({ data: response, response: rawResponse } = await groq.chat.completions
       .create(request)
       .withResponse());

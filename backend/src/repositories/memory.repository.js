@@ -105,7 +105,7 @@ async function findDuplicateMemory(client, userId, memoryType, content, options 
        AND memory_type = $2
        AND is_active = TRUE
        AND ${expiryCondition}
-       AND lower(regexp_replace(content, '[^a-z0-9]+', ' ', 'g')) = $3
+       AND trim(regexp_replace(lower(content), '[^a-z0-9]+', ' ', 'g')) = $3
      ORDER BY updated_at DESC
      LIMIT 1
      FOR UPDATE`,

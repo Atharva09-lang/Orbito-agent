@@ -167,6 +167,13 @@ export async function createMessageController(req, res) {
       }
     }
 
+    if (error?.code === "GROQ_NOT_CONFIGURED") {
+      return res.status(503).json({
+        success: false,
+        message: "AI service is not configured."
+      });
+    }
+
     if (isTokenLimitError(error)) {
       return res.status(429).json({
         success: false,

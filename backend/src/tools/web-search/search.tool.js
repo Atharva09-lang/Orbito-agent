@@ -1,24 +1,27 @@
 
-import { tavily } from "@tavily/core";
-
 const MAX_RESULTS = 8;
 const SEARCH_ATTEMPTS = 3;
 const SEARCH_TIMEOUT_SECONDS = 20;
 
-let client = null;
+let clientPromise = null;
 
-function getClient() {
-  if (!client) {
+async function getClient() {
+  if (!clientPromise) {
     const apiKey = process.env.TAVILY_API_KEY;
 
     if (!apiKey) {
-      throw new Error("TAVILY_API_KEY is missing from environment variables.");
+      const error = new Error("TAVILY_API_KEY is missing from environment variables.");
+      error.code = "TAVILY_NOT_CONFIGURED";
+      error.status = 503;
+      throw error;
     }
 
-    client = tavily({ apiKey });
+    clientPromise = import("@tavily/core").then(({ tavily }) =>
+      tavily({ apiKey })
+    );
   }
 
-  return client;
+  return clientPromise;
 }
 
 function wait(ms) {
@@ -30,11 +33,17 @@ async function runSearch(query, options) {
 
   for (let attempt = 1; attempt <= SEARCH_ATTEMPTS; attempt++) {
     try {
-      return await getClient().search(query, {
+      const client = await getClient();
+
+      return await client.search(query, {
         ...options,
         timeout: SEARCH_TIMEOUT_SECONDS
       });
     } catch (error) {
+      if (error?.code === "TAVILY_NOT_CONFIGURED") {
+        throw error;
+      }
+
       lastError = error;
 
       console.warn(
@@ -382,6 +391,10 @@ export async function searchWeb(query) {
       }))
     };
   } catch (error) {
+    if (error?.code === "TAVILY_NOT_CONFIGURED") {
+      throw error;
+    }
+
     console.error("Web search error:", error.message);
 
     throw new Error(

@@ -563,6 +563,15 @@ test("an exact create retry returns the existing memory without another insert",
   assert.equal(second.id, first.id);
   assert.equal(client.calls.filter((call) => call.text.startsWith("INSERT INTO memories")).length, 1);
   assert.equal(client.calls.filter((call) => call.text.includes("pg_advisory_xact_lock")).length, 2);
+
+  const duplicateQueries = client.calls.filter((call) =>
+    call.text.startsWith("SELECT *") && call.text.includes("regexp_replace")
+  );
+  assert.ok(duplicateQueries.length > 0);
+  assert.ok(duplicateQueries.every((call) =>
+    call.text.includes("trim(regexp_replace(lower(content), '[^a-z0-9]+', ' ', 'g'))")
+  ));
+  assert.ok(duplicateQueries.every((call) => !call.text.includes("lower(regexp_replace(content")));
 });
 
 test("an invalid source message is rejected even when an exact duplicate exists", async (t) => {
