@@ -7,14 +7,12 @@ import {
   supersedeMemory,
   updateMemory
 } from "../../src/repositories/memory.repository.js";
-import { formatMemoryContext } from "../../src/utils/memory-format.js";
-
-function normalizeMemoryKey(content) {
-  return String(content ?? "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
+import {
+  analyzeMemoryAttribution,
+  formatMemoryContext,
+  getPreferenceCategory,
+  normalizeMemoryKey
+} from "../../src/utils/memory-format.js";
 
 function createMockClient(handler, options = {}) {
   const calls = [];
@@ -67,23 +65,32 @@ function memoryRow(params, id) {
   };
 }
 
-function findStoredDuplicate(store, params, text) {
+function findStoredDuplicateCandidates(store, params, text) {
   const permanentOnly = text.includes("AND expires_at IS NULL");
-  const requestedExpiry = params[3] == null ? null : new Date(params[3]).getTime();
-  const sourceMessageId = params[4] ?? null;
+  const requestedExpiry = params[2] == null ? null : new Date(params[2]).getTime();
+  const sourceMessageId = params[3] ?? null;
+  const contentMatch = text.match(/AND content = \$(\d+)/);
+  const exactContent = contentMatch ? params[Number(contentMatch[1]) - 1] : undefined;
 
-  return store.find((memory) =>
+  return store.filter((memory) =>
     memory.is_active &&
     (!memory.user_id || memory.user_id === params[0]) &&
     memory.memory_type === params[1] &&
-    normalizeMemoryKey(memory.content) === params[2] &&
+    (exactContent === undefined || memory.content === exactContent) &&
     (permanentOnly
       ? memory.expires_at == null
       : memory.expires_at != null &&
         new Date(memory.expires_at).getTime() > Date.now() &&
         (new Date(memory.expires_at).getTime() === requestedExpiry ||
           (sourceMessageId && memory.source_message_id === sourceMessageId)))
-  ) || null;
+  ).sort((left, right) =>
+    new Date(right.updated_at ?? 0).getTime() - new Date(left.updated_at ?? 0).getTime()
+  ).map(({ id, content }) => ({ id, content }));
+}
+
+function categoryPrefixMatches(content, prefix) {
+  const normalize = (value) => value.normalize("NFKC").toLowerCase().normalize("NFKC");
+  return normalize(content).startsWith(normalize(prefix));
 }
 
 function findStoredCategory(store, params) {
@@ -95,19 +102,19 @@ function findStoredCategory(store, params) {
       : "dsa";
 
   return store.filter((memory) => {
-    const content = String(memory.content).toLowerCase();
-    const matchesSubject = (subject === "user" && !content.startsWith("[about:")) ||
-      content.startsWith(prefix.toLowerCase());
-    const matchesCategory = category === "dsa"
-      ? /\b(dsa|data structures?)\b/.test(content)
-      : new RegExp(`\\b${category}\\b`).test(content);
+    const attribution = analyzeMemoryAttribution(memory.content);
+    const prefixMatches = subject === "user"
+      ? !/^\[about:/i.test(memory.content)
+      : categoryPrefixMatches(memory.content, prefix);
 
     return memory.is_active &&
       (!memory.user_id || memory.user_id === userId) &&
       memory.memory_type === memoryType &&
       memory.expires_at == null &&
-      matchesSubject &&
-      matchesCategory;
+      prefixMatches &&
+      !attribution.ambiguous &&
+      attribution.subject === subject &&
+      getPreferenceCategory(memory.content) === category;
   });
 }
 
@@ -129,9 +136,15 @@ function successfulClient(target, options = {}) {
       return { rows: findStoredCategory(store, params) };
     }
 
-    if (text.startsWith("SELECT *") && text.includes("regexp_replace")) {
-      const duplicate = findStoredDuplicate(store, params, text);
-      return { rows: duplicate ? [duplicate] : [] };
+    if (text.startsWith("SELECT id, content") && text.includes("ORDER BY updated_at DESC")) {
+      return { rows: findStoredDuplicateCandidates(store, params, text) };
+    }
+
+    if (text.startsWith("SELECT *") && text.includes("WHERE id = $1") && text.includes("FOR UPDATE")) {
+      const row = store.find((memory) => memory.id === params[0] &&
+        (!memory.user_id || memory.user_id === params[1]) &&
+        memory.memory_type === params[2] && memory.is_active);
+      return { rows: row ? [row] : [] };
     }
 
     if (text.startsWith("INSERT INTO memories")) {
@@ -271,9 +284,15 @@ function createStoreClient(store, gate, options = {}) {
       return { rows: findStoredCategory(store, params) };
     }
 
-    if (text.startsWith("SELECT *") && text.includes("regexp_replace")) {
-      const duplicate = findStoredDuplicate(store, params, text);
-      return { rows: duplicate ? [duplicate] : [] };
+    if (text.startsWith("SELECT id, content") && text.includes("ORDER BY updated_at DESC")) {
+      return { rows: findStoredDuplicateCandidates(store, params, text) };
+    }
+
+    if (text.startsWith("SELECT *") && text.includes("WHERE id = $1") && text.includes("FOR UPDATE")) {
+      const row = store.find((memory) => memory.id === params[0] &&
+        (!memory.user_id || memory.user_id === params[1]) &&
+        memory.memory_type === params[2] && memory.is_active);
+      return { rows: row ? [row] : [] };
     }
 
     if (text.startsWith("SELECT * FROM memories")) {
@@ -500,7 +519,7 @@ test("incompatible type, subject, or expiration prevents superseding", async (t)
 test("a failed replacement insert rolls back without deactivating the old memory", async (t) => {
   const client = createMockClient((text) => {
     if (text.startsWith("SELECT id, memory_type, content")) return { rows: [pythonPreference] };
-    if (text.startsWith("SELECT *") && text.includes("regexp_replace")) return { rows: [] };
+    if (text.startsWith("SELECT id, content") && text.includes("ORDER BY updated_at DESC")) return { rows: [] };
     if (text.startsWith("INSERT INTO memories")) return { rows: [] };
     throw new Error(`Unexpected query: ${text}`);
   });
@@ -521,7 +540,7 @@ test("a failed replacement insert rolls back without deactivating the old memory
 test("a failed deactivation rolls back the transaction and reports failure", async (t) => {
   const client = createMockClient((text, params) => {
     if (text.startsWith("SELECT id, memory_type, content")) return { rows: [pythonPreference] };
-    if (text.startsWith("SELECT *") && text.includes("regexp_replace")) return { rows: [] };
+    if (text.startsWith("SELECT id, content") && text.includes("ORDER BY updated_at DESC")) return { rows: [] };
     if (text.startsWith("INSERT INTO memories")) {
       return { rows: [memoryRow(params, params[2].startsWith("Previous preference:") ? "history-id" : "replacement-id")] };
     }
@@ -565,13 +584,112 @@ test("an exact create retry returns the existing memory without another insert",
   assert.equal(client.calls.filter((call) => call.text.includes("pg_advisory_xact_lock")).length, 2);
 
   const duplicateQueries = client.calls.filter((call) =>
-    call.text.startsWith("SELECT *") && call.text.includes("regexp_replace")
+    call.text.startsWith("SELECT id, content") && call.text.includes("ORDER BY updated_at DESC")
   );
-  assert.ok(duplicateQueries.length > 0);
-  assert.ok(duplicateQueries.every((call) =>
-    call.text.includes("trim(regexp_replace(lower(content), '[^a-z0-9]+', ' ', 'g'))")
-  ));
-  assert.ok(duplicateQueries.every((call) => !call.text.includes("lower(regexp_replace(content")));
+  const duplicateLocks = client.calls.filter((call) =>
+    call.text.startsWith("SELECT *") &&
+    call.text.includes("WHERE id = $1") &&
+    call.text.includes("FOR UPDATE")
+  );
+  assert.equal(duplicateQueries.length, 2);
+  assert.equal(duplicateLocks.length, 1);
+  assert.ok(duplicateQueries.every((call) => !call.text.includes("regexp_replace")));
+  assert.ok(duplicateQueries.every((call) => !call.text.startsWith("SELECT *")));
+});
+
+test("sequential creates reuse canonically equivalent subject identities", async (t) => {
+  const pairs = [
+    ["Café", "Cafe\u0301"],
+    ["Ｒａｈｕｌ", "Rahul"]
+  ];
+
+  for (const [stored, incoming] of pairs) {
+    await t.test(`${stored} and ${incoming}`, async (t) => {
+      const client = successfulClient(null);
+      mockConnect(t, client);
+
+      const first = await createMemory(
+        "user-a",
+        "preference",
+        `[about: ${stored}] Prefers tea.`
+      );
+      const second = await createMemory(
+        "user-a",
+        "preference",
+        `[about: ${incoming}] Prefers tea.`
+      );
+
+      assert.equal(second.id, first.id);
+      assert.equal(second.content, first.content);
+      assert.equal(client.calls.filter((call) => call.text.startsWith("INSERT INTO memories")).length, 1);
+      const locks = client.calls.filter((call) => call.text.includes("pg_advisory_xact_lock"));
+      assert.equal(locks.length, 2);
+      assert.equal(locks[0].params[0], locks[1].params[0]);
+    });
+  }
+});
+
+test("equivalent normalized text does not merge explicit and natural-language subjects", async (t) => {
+  const client = successfulClient(null);
+  mockConnect(t, client);
+
+  const first = await createMemory("user-a", "preference", "[about: rahul] Prefers tea.");
+  const second = await createMemory("user-a", "preference", "About: Rahul prefers tea.");
+
+  assert.equal(normalizeMemoryKey(first.content), normalizeMemoryKey(second.content));
+  assert.notEqual(second.id, first.id);
+  assert.equal(second.content, "About: Rahul prefers tea.");
+  assert.equal(client.calls.filter((call) => call.text.startsWith("INSERT INTO memories")).length, 2);
+  const duplicateLocks = client.calls.filter((call) =>
+    call.text.startsWith("SELECT *") && call.text.includes("FOR UPDATE")
+  );
+  assert.equal(duplicateLocks.length, 0);
+});
+
+test("an ambiguous duplicate candidate is never silently reused", async (t) => {
+  const ambiguous = {
+    ...pythonPreference,
+    id: "ambiguous-id",
+    user_id: "user-a",
+    content: "[about Rahul] Prefers tea.",
+    is_active: true
+  };
+  const client = successfulClient(null, { existing: [ambiguous] });
+  mockConnect(t, client);
+
+  const result = await createMemory("user-a", "preference", "About: Rahul prefers tea.");
+
+  assert.equal(normalizeMemoryKey(ambiguous.content), normalizeMemoryKey(result.content));
+  assert.notEqual(result.id, ambiguous.id);
+  assert.equal(client.calls.some((call) =>
+    call.text.startsWith("SELECT *") && call.text.includes("FOR UPDATE")
+  ), false);
+  assert.equal(client.calls.filter((call) => call.text.startsWith("INSERT INTO memories")).length, 1);
+});
+
+test("concurrent creates share one canonical subject lock and insert one row", async (t) => {
+  const store = [];
+  const gate = createAdvisoryGate();
+  const clients = [createStoreClient(store, gate), createStoreClient(store, gate)];
+  let connectIndex = 0;
+  t.mock.method(pool, "connect", async () => clients[connectIndex++]);
+
+  const results = await Promise.all([
+    createMemory("user-a", "preference", "[about: Café] Prefers tea."),
+    createMemory("user-a", "preference", "[about: Cafe\u0301] Prefers tea.")
+  ]);
+
+  assert.equal(results[0].id, results[1].id);
+  assert.equal(results[0].content, results[1].content);
+  assert.equal(store.length, 1);
+  assert.equal(clients.flatMap((client) => client.calls).filter((call) =>
+    call.text.startsWith("INSERT INTO memories")
+  ).length, 1);
+  assert.equal(gate.acquiredKeys.length, 2);
+  assert.equal(new Set(gate.acquiredKeys).size, 1);
+  assert.equal(gate.maxActiveByKey.get(gate.acquiredKeys[0]), 1);
+  assert.equal(gate.active, 0);
+  assert.ok(clients.every((client) => client.released));
 });
 
 test("an invalid source message is rejected even when an exact duplicate exists", async (t) => {
@@ -622,6 +740,41 @@ test("historical preference snapshots are not duplicated", async (t) => {
     call.text.startsWith("INSERT INTO memories") &&
     call.params[2].startsWith("Previous preference:")
   ).length, 0);
+});
+
+test("sequential symbol-only preference replacements preserve distinct history", async (t) => {
+  const store = [{
+    ...pythonPreference,
+    id: "symbols-one",
+    user_id: "user-a",
+    content: "!!!",
+    is_active: true
+  }];
+  const gate = createAdvisoryGate();
+  const client = createStoreClient(store, gate);
+  mockConnect(t, client);
+
+  const second = await supersedeMemory("user-a", "symbols-one", "preference", "???");
+  const third = await supersedeMemory("user-a", second.memory.id, "preference", "😀🔥");
+
+  assert.equal(second.status, "superseded");
+  assert.equal(third.status, "superseded");
+  const history = store.filter((memory) => memory.memory_type === "fact" && memory.is_active);
+  assert.deepEqual(history.map((memory) => memory.content).sort(), [
+    "Previous preference: !!!",
+    "Previous preference: ???"
+  ]);
+  assert.deepEqual(store.filter((memory) =>
+    memory.memory_type === "preference" && memory.is_active
+  ).map((memory) => memory.content), ["😀🔥"]);
+
+  const exactQueries = client.calls.filter((call) =>
+    call.text.startsWith("SELECT id, content") && call.text.includes("AND content = $3")
+  );
+  assert.deepEqual(exactQueries.map((call) => call.params), [
+    ["user-a", "fact", "Previous preference: !!!"],
+    ["user-a", "fact", "Previous preference: ???"]
+  ]);
 });
 
 test("a permanent replacement does not reuse a temporary duplicate", async (t) => {
@@ -676,9 +829,15 @@ test("scoped serialization lets concurrent replacements reuse one current prefer
         return { rows: findStoredCategory(store, params) };
       }
 
-      if (text.startsWith("SELECT *") && text.includes("regexp_replace")) {
-        const duplicate = findStoredDuplicate(store, params, text);
-        return { rows: duplicate ? [duplicate] : [] };
+      if (text.startsWith("SELECT id, content") && text.includes("ORDER BY updated_at DESC")) {
+        return { rows: findStoredDuplicateCandidates(store, params, text) };
+      }
+
+      if (text.startsWith("SELECT *") && text.includes("WHERE id = $1") && text.includes("FOR UPDATE")) {
+        const row = store.find((memory) => memory.id === params[0] &&
+          (!memory.user_id || memory.user_id === params[1]) &&
+          memory.memory_type === params[2] && memory.is_active);
+        return { rows: row ? [row] : [] };
       }
 
       if (text.startsWith("INSERT INTO memories")) {
@@ -872,9 +1031,15 @@ test("a supersede retry after simulated rollback executes normally", async (t) =
       return { rows: findStoredCategory(store, params) };
     }
 
-    if (text.startsWith("SELECT *") && text.includes("regexp_replace")) {
-      const duplicate = findStoredDuplicate(store, params, text);
-      return { rows: duplicate ? [duplicate] : [] };
+    if (text.startsWith("SELECT id, content") && text.includes("ORDER BY updated_at DESC")) {
+      return { rows: findStoredDuplicateCandidates(store, params, text) };
+    }
+
+    if (text.startsWith("SELECT *") && text.includes("WHERE id = $1") && text.includes("FOR UPDATE")) {
+      const row = store.find((memory) => memory.id === params[0] &&
+        (!memory.user_id || memory.user_id === params[1]) &&
+        memory.memory_type === params[2] && memory.is_active);
+      return { rows: row ? [row] : [] };
     }
 
     if (text.startsWith("INSERT INTO memories")) {
@@ -905,6 +1070,58 @@ test("a supersede retry after simulated rollback executes normally", async (t) =
   assert.equal(retry.status, "superseded");
   assert.equal(store.filter((memory) => memory.is_active && memory.memory_type === "preference").length, 1);
   assert.equal(store.filter((memory) => memory.content.startsWith("Previous preference:")).length, 1);
+});
+
+test("category reconciliation recognizes canonical and legacy subject prefixes", async (t) => {
+  const cases = [
+    ["café", "Cafe\u0301"],
+    ["rahul", "Ｒａｈｕｌ"]
+  ];
+
+  for (const [canonical, legacy] of cases) {
+    await t.test(`${canonical} with ${legacy}`, async (t) => {
+      const legacyPreference = {
+        ...pythonPreference,
+        id: "legacy-id",
+        user_id: "user-a",
+        content: `[about: ${legacy}] Prefers Ruby for backend development.`,
+        is_active: true
+      };
+      const target = {
+        ...pythonPreference,
+        user_id: "user-a",
+        content: `[about: ${canonical}] Prefers Python for backend development.`,
+        is_active: true
+      };
+      const client = successfulClient(target, { existing: [legacyPreference] });
+      mockConnect(t, client);
+
+      const result = await supersedeMemory(
+        "user-a",
+        target.id,
+        "preference",
+        `[about: ${canonical}] Prefers Node.js for backend development.`
+      );
+
+      assert.equal(result.status, "superseded");
+      const deactivated = client.calls.filter((call) => call.text.startsWith("UPDATE memories"));
+      assert.deepEqual(deactivated.map((call) => call.params[0]).sort(), ["legacy-id", "python-id"]);
+      const categoryQueries = client.calls.filter((call) =>
+        call.text.startsWith("SELECT id, memory_type, content") &&
+        call.text.includes("normalize(lower(") &&
+        call.text.includes("FOR UPDATE")
+      );
+      assert.equal(categoryQueries.length, 1);
+      assert.equal(categoryQueries[0].params[2], canonical);
+      assert.ok(categoryQueries[0].text.includes(
+        "left( normalize(lower(normalize(content, NFKC)), NFKC), length(normalize(lower(normalize($4, NFKC)), NFKC)) ) = normalize(lower(normalize($4, NFKC)), NFKC)"
+      ));
+      assert.ok(client.calls.some((call) =>
+        call.text.startsWith("INSERT INTO memories") &&
+        call.params[2] === `[about: ${canonical}] Previous preference: Prefers Ruby for backend development.`
+      ));
+    });
+  }
 });
 
 test("uncategorized preferences are not destructively grouped by semantic guess", async (t) => {
@@ -947,9 +1164,15 @@ test("concurrent different-value category updates leave one active preference", 
         return { rows: findStoredCategory(store, params) };
       }
 
-      if (text.startsWith("SELECT *") && text.includes("regexp_replace")) {
-        const duplicate = findStoredDuplicate(store, params, text);
-        return { rows: duplicate ? [duplicate] : [] };
+      if (text.startsWith("SELECT id, content") && text.includes("ORDER BY updated_at DESC")) {
+        return { rows: findStoredDuplicateCandidates(store, params, text) };
+      }
+
+      if (text.startsWith("SELECT *") && text.includes("WHERE id = $1") && text.includes("FOR UPDATE")) {
+        const row = store.find((memory) => memory.id === params[0] &&
+          (!memory.user_id || memory.user_id === params[1]) &&
+          memory.memory_type === params[2] && memory.is_active);
+        return { rows: row ? [row] : [] };
       }
 
       if (text.startsWith("INSERT INTO memories")) {
@@ -1399,4 +1622,119 @@ test("category row locks are narrowed by owner, subject, category, and determini
   assert.equal(store.find((memory) => memory.id === "dsa-java").is_active, true);
   assert.equal(store.find((memory) => memory.id === "rahul-java").is_active, true);
   assert.equal(store.find((memory) => memory.id === "other-user").is_active, true);
+});
+
+test("repository reuses genuinely equivalent Unicode duplicates", async (t) => {
+  const scenarios = [
+    ["मुझे चाय पसंद है", "मुझे   चाय, पसंद है!"],
+    ["我喜欢喝茶", "我喜欢喝茶！"],
+    ["أحب القهوة", "أحب   القهوة."],
+    ["私はコーヒーが好きです", "私はコーヒーが好きです！"],
+    ["Café", "Cafe\u0301"]
+  ];
+
+  for (const [stored, requested] of scenarios) {
+    await t.test(stored, async (t) => {
+      const existing = {
+        ...pythonPreference,
+        id: "unicode-existing",
+        memory_type: "fact",
+        user_id: "user-a",
+        content: stored,
+        is_active: true
+      };
+      const client = successfulClient(null, { existing: [existing] });
+      mockConnect(t, client);
+
+      const result = await createMemory("user-a", "fact", requested);
+
+      assert.equal(result.id, existing.id);
+      assert.equal(client.calls.filter((call) => call.text.startsWith("INSERT INTO memories")).length, 0);
+      const lock = client.calls.find((call) =>
+        call.text.startsWith("SELECT *") &&
+        call.text.includes("WHERE id = $1") &&
+        call.text.includes("FOR UPDATE")
+      );
+      assert.deepEqual(lock.params, [existing.id, "user-a", "fact"]);
+    });
+  }
+});
+
+test("repository does not collide distinct Unicode memories", async (t) => {
+  const pairs = [
+    ["मुझे चाय पसंद है", "मुझे कॉफी पसंद है"],
+    ["我喜欢喝茶", "我喜欢喝咖啡"],
+    ["أحب القهوة", "أحب الشاي"],
+    ["私はコーヒーが好きです", "私はお茶が好きです"]
+  ];
+
+  for (const [stored, requested] of pairs) {
+    await t.test(stored, async (t) => {
+      const existing = {
+        ...pythonPreference,
+        id: "unicode-existing",
+        memory_type: "fact",
+        user_id: "user-a",
+        content: stored,
+        is_active: true
+      };
+      const client = successfulClient(null, { existing: [existing] });
+      mockConnect(t, client);
+
+      const result = await createMemory("user-a", "fact", requested);
+
+      assert.equal(result.id, "replacement-id");
+      assert.equal(result.content, requested);
+      assert.equal(client.calls.filter((call) => call.text.startsWith("INSERT INTO memories")).length, 1);
+    });
+  }
+});
+
+test("repository never matches empty normalized keys", async (t) => {
+  const existing = {
+    ...pythonPreference,
+    id: "symbols-existing",
+    memory_type: "fact",
+    user_id: "user-a",
+    content: "!!!",
+    is_active: true
+  };
+  const client = successfulClient(null, { existing: [existing] });
+  mockConnect(t, client);
+
+  const result = await createMemory("user-a", "fact", "???");
+
+  assert.equal(result.id, "replacement-id");
+  assert.equal(client.calls.some((call) => call.text.includes("ORDER BY updated_at DESC")), false);
+  assert.equal(client.calls.filter((call) => call.text.startsWith("INSERT INTO memories")).length, 1);
+});
+
+test("repository updates do not treat distinct or empty Unicode keys as no-ops", async (t) => {
+  const scenarios = [
+    ["मुझे चाय पसंद है", "मुझे कॉफी पसंद है"],
+    ["!!!", "???"]
+  ];
+
+  for (const [stored, requested] of scenarios) {
+    await t.test(`${stored} to ${requested}`, async (t) => {
+      const existing = {
+        ...pythonPreference,
+        id: "unicode-update",
+        memory_type: "fact",
+        user_id: "user-a",
+        content: stored,
+        is_active: true
+      };
+      const store = [existing];
+      const gate = createAdvisoryGate();
+      const client = createStoreClient(store, gate);
+      mockConnect(t, client);
+
+      const result = await updateMemory("user-a", existing.id, requested);
+
+      assert.equal(result.status, "updated");
+      assert.equal(result.memory.content, requested);
+      assert.equal(gate.active, 0);
+    });
+  }
 });

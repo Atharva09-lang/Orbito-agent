@@ -42,7 +42,7 @@ function createClient() {
         return { rows: [] };
       }
 
-      if (normalized.startsWith("SELECT *") && normalized.includes("regexp_replace")) {
+      if (normalized.startsWith("SELECT id, content") && normalized.includes("ORDER BY updated_at DESC")) {
         return { rows: [] };
       }
 
@@ -114,7 +114,15 @@ function mockUpdate(t, existing, options = {}) {
         return { rows: [] };
       }
 
-      if (normalized.startsWith("SELECT *") && normalized.includes("regexp_replace")) {
+      if (normalized.startsWith("SELECT id, content") && normalized.includes("ORDER BY updated_at DESC")) {
+        return { rows: options.duplicate ? [options.duplicate] : [] };
+      }
+
+      if (
+        normalized.startsWith("SELECT *") &&
+        normalized.includes("WHERE id = $1") &&
+        normalized.includes("FOR UPDATE")
+      ) {
         return { rows: options.duplicate ? [options.duplicate] : [] };
       }
 

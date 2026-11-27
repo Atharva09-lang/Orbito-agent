@@ -827,7 +827,7 @@ async function transactionScenarios() {
   const deadlockUpdated = `I updated the Phase 3 deadlock fixture ${RUN_ID}.`;
   const deadlockTarget = await createMemory(USER_A, "fact", deadlockOriginal);
   assert.ok(deadlockTarget);
-  const deadlockBlocker = await auditPool.connect();
+  let deadlockBlocker = await auditPool.connect();
   let deadlockOperation;
   try {
     await deadlockBlocker.query("BEGIN");
@@ -863,6 +863,11 @@ async function transactionScenarios() {
     const deadlockResult = await deadlockOperation;
     const resultCode = deadlockResult.ok ? null : deadlockResult.error.code;
     assert.ok(blockerError?.code === "40P01" || resultCode === "40P01");
+
+    const blocker = deadlockBlocker;
+    deadlockBlocker = null;
+    await rollbackAndRelease(blocker);
+
     let row = await readMemory(deadlockTarget.id);
     if (deadlockResult.ok) {
       assert.equal(blockerError?.code, "40P01");
@@ -886,7 +891,9 @@ async function transactionScenarios() {
       retryAfterRollback: !deadlockResult.ok
     });
   } finally {
-    await rollbackAndRelease(deadlockBlocker);
+    if (deadlockBlocker) {
+      await rollbackAndRelease(deadlockBlocker);
+    }
   }
   await deadlockOperation;
   await serializationScenario();

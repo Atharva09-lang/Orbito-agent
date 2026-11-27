@@ -51,8 +51,10 @@ const NON_NAME_STARTS = new Set([
 
 export function normalizeSubject(subject) {
   const value = String(subject ?? "")
+    .normalize("NFKC")
     .trim()
     .toLowerCase()
+    .normalize("NFKC")
     .replace(/\s+/g, " ")
     .replace(/[\[\]]/g, "")
     .trim();
@@ -385,11 +387,19 @@ export function buildMemoryContent(subject, text) {
   return normalized === "user" ? body : `[about: ${normalized}] ${body}`;
 }
 
-export function normalizeMemoryText(content) {
-  return parseMemorySubject(content).text
+export function normalizeMemoryKey(content) {
+  const normalized = String(content ?? "")
+    .normalize("NFKC")
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
+    .normalize("NFKC")
+    .replace(/[^\p{L}\p{N}\p{M}]+/gu, " ")
     .trim();
+
+  return /[\p{L}\p{N}]/u.test(normalized) ? normalized : "";
+}
+
+export function normalizeMemoryText(content) {
+  return normalizeMemoryKey(parseMemorySubject(content).text);
 }
 
 export function getMemoryExpiryKey(memory) {
@@ -405,7 +415,10 @@ export function getMemoryExpiryKey(memory) {
 }
 
 export function getPreferenceCategory(content) {
-  const text = normalizeMemoryText(content);
+  const text = parseMemorySubject(content).text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 
   if (/\bbackend\b/.test(text)) {
     return "backend";
@@ -501,9 +514,14 @@ export function planMemoryActions(extracted, candidates, existing, now = new Dat
   const known = new Set(
     existing
       .filter((memory) => !analyzeMemoryAttribution(memory.content).ambiguous)
-      .map((memory) =>
-        `${memory.memory_type}|${parseMemorySubject(memory.content).subject}|${getMemoryExpiryKey(memory)}|${normalizeMemoryText(memory.content)}`
-      )
+      .map((memory) => {
+        const normalized = normalizeMemoryText(memory.content);
+
+        return normalized
+          ? `${memory.memory_type}|${parseMemorySubject(memory.content).subject}|${getMemoryExpiryKey(memory)}|${normalized}`
+          : null;
+      })
+      .filter(Boolean)
   );
   const replaced = new Set();
   const plan = [];
@@ -551,7 +569,10 @@ export function planMemoryActions(extracted, candidates, existing, now = new Dat
       expiresAt: getExpiryDate(duration, item.expires_in_days, now)
     };
     const expiryKey = getMemoryExpiryKey({ expires_at: memory.expiresAt });
-    const key = `${item.memory_type}|${subject}|${expiryKey}|${normalizeMemoryText(content)}`;
+    const normalized = normalizeMemoryText(content);
+    const key = normalized
+      ? `${item.memory_type}|${subject}|${expiryKey}|${normalized}`
+      : null;
 
     const target = item.action === "update"
       ? candidateById.get(item.replaces_id)
@@ -559,8 +580,9 @@ export function planMemoryActions(extracted, candidates, existing, now = new Dat
     const targetAttribution = target
       ? analyzeMemoryAttribution(target.content)
       : null;
-    const targetIsDuplicate = target &&
-      normalizeMemoryText(target.content) === normalizeMemoryText(content);
+    const targetIsDuplicate = Boolean(
+      target && normalized && normalizeMemoryText(target.content) === normalized
+    );
 
     if (targetIsDuplicate) {
       plan.push({ type: "skip", reason: "duplicate" });
@@ -581,7 +603,7 @@ export function planMemoryActions(extracted, candidates, existing, now = new Dat
     if (canSupersede) {
       replaced.add(target.id);
       plan.push({ type: "supersede", replacesId: target.id, memory });
-    } else if (known.has(key)) {
+    } else if (key && known.has(key)) {
       plan.push({ type: "skip", reason: "duplicate" });
       continue;
     } else if (item.action === "update") {
@@ -591,7 +613,9 @@ export function planMemoryActions(extracted, candidates, existing, now = new Dat
       plan.push({ type: "add", memory });
     }
 
-    known.add(key);
+    if (key) {
+      known.add(key);
+    }
   }
 
   return plan;

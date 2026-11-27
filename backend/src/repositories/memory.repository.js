@@ -5,6 +5,7 @@ import {
   buildHistoricalPreferenceContent,
   buildMemoryContent,
   getPreferenceCategory,
+  normalizeMemoryKey,
   normalizeMemoryText,
   validateMemoryAttribution
 } from "../utils/memory-format.js";
@@ -52,13 +53,6 @@ async function insertMemory(client, userId, memoryType, content, options = {}) {
   return rows[0] || null;
 }
 
-function normalizeMemoryKey(content) {
-  return String(content ?? "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
 async function lockMemoryScope(client, userId, subject, memoryType) {
   await client.query(
     "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
@@ -83,36 +77,96 @@ async function sourceMessageIsOwned(client, userId, sourceMessageId) {
 }
 
 async function findDuplicateMemory(client, userId, memoryType, content, options = {}) {
+  const attribution = analyzeMemoryAttribution(content);
+  const exactContent = options.exactContent === true;
+  const normalizedKey = exactContent ? null : normalizeMemoryKey(content);
+
+  if (attribution.ambiguous || !attribution.subject || (!exactContent && !normalizedKey)) {
+    return null;
+  }
+
   const expiresAt = options.expiresAt ?? null;
   const permanentOnly = options.permanentOnly ?? expiresAt === null;
-  const params = [userId, memoryType, normalizeMemoryKey(content)];
+  const params = [userId, memoryType];
   let expiryCondition = "expires_at IS NULL";
+  let contentCondition = "";
 
   if (!permanentOnly) {
     params.push(expiresAt);
-    expiryCondition = "expires_at > NOW() AND expires_at = $4";
+    expiryCondition = "expires_at > NOW() AND expires_at = $3";
 
     if (options.sourceMessageId) {
       params.push(options.sourceMessageId);
-      expiryCondition = "expires_at > NOW() AND (expires_at = $4 OR source_message_id = $5)";
+      expiryCondition = "expires_at > NOW() AND (expires_at = $3 OR source_message_id = $4)";
     }
   }
 
+  if (exactContent) {
+    params.push(content);
+    contentCondition = `AND content = $${params.length}`;
+  }
+
   const { rows } = await client.query(
-    `SELECT *
+    `SELECT id, content
      FROM memories
      WHERE user_id = $1
        AND memory_type = $2
        AND is_active = TRUE
        AND ${expiryCondition}
-       AND trim(regexp_replace(lower(content), '[^a-z0-9]+', ' ', 'g')) = $3
-     ORDER BY updated_at DESC
-     LIMIT 1
-     FOR UPDATE`,
+       ${contentCondition}
+     ORDER BY updated_at DESC`,
     params
   );
 
-  return rows[0] || null;
+  const matchesDuplicate = (memory) => {
+    const candidateAttribution = analyzeMemoryAttribution(memory.content);
+
+    return !candidateAttribution.ambiguous &&
+      candidateAttribution.subject === attribution.subject &&
+      (exactContent
+        ? memory.content === content
+        : normalizeMemoryKey(memory.content) === normalizedKey);
+  };
+  const duplicate = rows.find(matchesDuplicate);
+
+  if (!duplicate) {
+    return null;
+  }
+
+  const lockParams = [duplicate.id, userId, memoryType];
+  let lockExpiryCondition = "expires_at IS NULL";
+  let lockContentCondition = "";
+
+  if (!permanentOnly) {
+    lockParams.push(expiresAt);
+    lockExpiryCondition = "expires_at > NOW() AND expires_at = $4";
+
+    if (options.sourceMessageId) {
+      lockParams.push(options.sourceMessageId);
+      lockExpiryCondition = "expires_at > NOW() AND (expires_at = $4 OR source_message_id = $5)";
+    }
+  }
+
+  if (exactContent) {
+    lockParams.push(content);
+    lockContentCondition = `AND content = $${lockParams.length}`;
+  }
+
+  const { rows: lockedRows } = await client.query(
+    `SELECT *
+     FROM memories
+     WHERE id = $1
+       AND user_id = $2
+       AND memory_type = $3
+       AND is_active = TRUE
+       AND ${lockExpiryCondition}
+       ${lockContentCondition}
+     FOR UPDATE`,
+    lockParams
+  );
+  const locked = lockedRows[0];
+
+  return locked && matchesDuplicate(locked) ? locked : null;
 }
 
 async function findActiveCategoryPreferences(client, userId, subject, memoryType, category) {
@@ -134,7 +188,10 @@ async function findActiveCategoryPreferences(client, userId, subject, memoryType
        AND expires_at IS NULL
        AND (
          ($3 = 'user' AND content NOT ILIKE '[about:%')
-         OR lower(left(content, length($4))) = lower($4)
+         OR left(
+           normalize(lower(normalize(content, NFKC)), NFKC),
+           length(normalize(lower(normalize($4, NFKC)), NFKC))
+         ) = normalize(lower(normalize($4, NFKC)), NFKC)
        )
        AND content ~* $5
      ORDER BY updated_at, id
@@ -174,7 +231,9 @@ async function ensureHistoricalPreference(client, userId, target) {
 
   await lockMemoryScope(client, userId, attribution.subject, "fact");
 
-  const existing = await findDuplicateMemory(client, userId, "fact", content);
+  const existing = await findDuplicateMemory(client, userId, "fact", content, {
+    exactContent: !normalizeMemoryKey(attribution.text)
+  });
   if (existing) {
     return existing;
   }
@@ -513,7 +572,12 @@ export async function updateMemory(userId, memoryId, content) {
       return { status: "invalid_memory" };
     }
 
-    if (normalizeMemoryText(target.content) === normalizeMemoryText(attribution.content)) {
+    const normalizedContent = normalizeMemoryText(attribution.content);
+
+    if (
+      normalizedContent &&
+      normalizeMemoryText(target.content) === normalizedContent
+    ) {
       await client.query("COMMIT");
       return { status: "updated", memory: target };
     }

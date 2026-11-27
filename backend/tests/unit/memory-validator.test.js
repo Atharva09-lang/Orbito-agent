@@ -75,7 +75,7 @@ function mockCreate(t) {
       if (normalized.startsWith("SELECT id, memory_type, content")) {
         return { rows: [] };
       }
-      if (normalized.startsWith("SELECT *") && normalized.includes("regexp_replace")) {
+      if (normalized.startsWith("SELECT id, content") && normalized.includes("ORDER BY updated_at DESC")) {
         return { rows: [] };
       }
       if (normalized.startsWith("INSERT INTO memories")) {
@@ -130,7 +130,7 @@ function mockUpdate(t, existing) {
       if (normalized.includes("pg_advisory_xact_lock")) {
         return { rows: [] };
       }
-      if (normalized.startsWith("SELECT *") && normalized.includes("regexp_replace")) {
+      if (normalized.startsWith("SELECT id, content") && normalized.includes("ORDER BY updated_at DESC")) {
         return { rows: [] };
       }
       if (normalized.startsWith("SELECT * FROM memories")) {

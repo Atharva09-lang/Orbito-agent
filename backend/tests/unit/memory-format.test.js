@@ -5,6 +5,9 @@ import {
   analyzeMemoryAttribution,
   buildMemoryContent,
   formatMemoryContext,
+  getPreferenceCategory,
+  normalizeMemoryKey,
+  normalizeMemoryText,
   normalizeSubject,
   parseMemorySubject,
   planMemoryActions,
@@ -586,6 +589,50 @@ test("relationship descriptors normalize without merging different people", () =
   assert.equal(subjectsMatch("friend Rahul", "friend Aman"), false);
 });
 
+test("canonical subject identity includes composed accents and full-width Latin", () => {
+  const pairs = [
+    ["Café", "Cafe\u0301"],
+    ["Ｒａｈｕｌ", "Rahul"]
+  ];
+
+  for (const [stored, incoming] of pairs) {
+    const expected = normalizeSubject(stored);
+    assert.equal(normalizeSubject(incoming), expected);
+    assert.equal(subjectsMatch(incoming, stored), true);
+    assert.equal(buildMemoryContent(stored, "Prefers tea."), buildMemoryContent(incoming, "Prefers tea."));
+    assert.deepEqual(parseMemorySubject(buildMemoryContent(incoming, "Prefers tea.")), {
+      subject: expected,
+      text: "Prefers tea."
+    });
+  }
+});
+
+test("the planner deduplicates canonically equivalent subject identities", () => {
+  for (const [subject, storedContent] of [
+    ["Cafe\u0301", "[about: café] Prefers tea."],
+    ["Ｒａｈｕｌ", "[about: rahul] Prefers tea."]
+  ]) {
+    const existing = [{
+      id: `memory-${subject}`,
+      memory_type: "preference",
+      content: storedContent,
+      expires_at: null
+    }];
+    const [step] = planMemoryActions([
+      extracted({ subject, content: "Prefers tea." })
+    ], existing, existing, NOW);
+
+    assert.deepEqual(step, { type: "skip", reason: "duplicate" });
+  }
+});
+
+test("preference categories preserve their existing ASCII compatibility behavior", () => {
+  assert.equal(getPreferenceCategory("Prefers Node.js for BACKEND development."), "backend");
+  assert.equal(getPreferenceCategory("Practices data structures and algorithms."), "dsa");
+  assert.equal(getPreferenceCategory("Builds Frontend interfaces."), "frontend");
+  assert.equal(getPreferenceCategory("[about: Ｃａｆｅ] ＢＡＣＫＥＮＤ"), null);
+});
+
 test("temporary and permanent duplicate identity includes expiration", () => {
   const content = "Travelling this week.";
   const expiry = "2026-12-01T00:00:00.000Z";
@@ -619,4 +666,100 @@ test("leading whitespace and mixed-case explicit subjects parse without changing
   for (const content of ["[about Rahul] Prefers Java.", "[about:] Prefers Java.", "[about: [rahul]] Prefers Java."]) {
     assert.equal(validateMemoryAttribution(content, "Rahul").reason, "ambiguous_subject");
   }
+});
+
+test("memory normalization preserves existing ASCII punctuation and whitespace behavior", () => {
+  assert.equal(
+    normalizeMemoryKey("  Prefers\tNode.js, for BACKEND development!!!  "),
+    "prefers node js for backend development"
+  );
+  assert.equal(normalizeMemoryKey("User's C++ project."), "user s c project");
+  assert.equal(normalizeMemoryText("[about: Rahul] Prefers Java for DSA."), "prefers java for dsa");
+  assert.notEqual(
+    normalizeMemoryKey("[about: rahul] Prefers tea."),
+    normalizeMemoryKey("[about: aman] Prefers tea.")
+  );
+});
+
+test("memory normalization preserves distinct Hindi, Chinese, Arabic, and Japanese text", () => {
+  const distinctPairs = [
+    ["मुझे चाय पसंद है", "मुझे कॉफी पसंद है"],
+    ["我喜欢喝茶", "我喜欢喝咖啡"],
+    ["أحب القهوة", "أحب الشاي"],
+    ["私はコーヒーが好きです", "私はお茶が好きです"]
+  ];
+
+  for (const [left, right] of distinctPairs) {
+    const leftKey = normalizeMemoryKey(left);
+    const rightKey = normalizeMemoryKey(right);
+
+    assert.ok(leftKey);
+    assert.ok(rightKey);
+    assert.notEqual(leftKey, rightKey);
+  }
+
+  assert.equal(normalizeMemoryKey("मुझे चाय पसंद है"), "मुझे चाय पसंद है");
+  assert.equal(normalizeMemoryKey("我喜欢喝茶"), "我喜欢喝茶");
+  assert.equal(normalizeMemoryKey("أحب القهوة"), "أحب القهوة");
+  assert.equal(normalizeMemoryKey("私はコーヒーが好きです"), "私はコーヒーが好きです");
+});
+
+test("memory normalization preserves combining marks and canonical equivalents", () => {
+  assert.equal(normalizeMemoryKey("Cafe\u0301"), "café");
+  assert.equal(normalizeMemoryKey("Cafe\u0301"), normalizeMemoryKey("Café"));
+  assert.equal(normalizeMemoryKey("कि"), normalizeMemoryKey("\u0915\u093f"));
+  assert.ok(normalizeMemoryKey("कि").includes("\u093f"));
+});
+
+test("empty and symbol-only content never produces a duplicate key", () => {
+  for (const content of ["", "   ", "!!!", "😀🔥", "\u0301"]) {
+    assert.equal(normalizeMemoryKey(content), "");
+  }
+});
+
+test("equivalent Unicode text is still deduplicated by the planner", () => {
+  const existing = [{
+    id: "hindi-tea",
+    memory_type: "preference",
+    content: "मुझे चाय पसंद है",
+    expires_at: null
+  }];
+  const [step] = planMemoryActions([
+    extracted({ content: "मुझे   चाय, पसंद है!" })
+  ], existing, existing, NOW);
+
+  assert.deepEqual(step, { type: "skip", reason: "duplicate" });
+});
+
+test("non-equivalent Unicode memories do not collide in the planner", () => {
+  const pairs = [
+    ["मुझे चाय पसंद है", "मुझे कॉफी पसंद है"],
+    ["我喜欢喝茶", "我喜欢喝咖啡"],
+    ["أحب القهوة", "أحب الشاي"],
+    ["私はコーヒーが好きです", "私はお茶が好きです"]
+  ];
+
+  for (const [first, second] of pairs) {
+    const plan = planMemoryActions([
+      extracted({ content: first }),
+      extracted({ content: second })
+    ], [], [], NOW);
+
+    assert.deepEqual(plan.map((step) => step.type), ["add", "add"]);
+  }
+});
+
+test("symbol-only planner entries do not match each other through an empty key", () => {
+  const existing = [{
+    id: "symbols",
+    memory_type: "fact",
+    content: "!!!",
+    expires_at: null
+  }];
+  const plan = planMemoryActions([
+    extracted({ memory_type: "fact", content: "???" }),
+    extracted({ memory_type: "fact", content: "😀🔥" })
+  ], existing, existing, NOW);
+
+  assert.deepEqual(plan.map((step) => step.type), ["add", "add"]);
 });
