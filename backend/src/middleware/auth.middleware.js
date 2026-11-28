@@ -1,54 +1,49 @@
-import {createRemoteJWKSet, jwtVerify} from "jose";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 
-const jwksUrl = process.env.NEON_AUTH_JWKS_URL;
-const baseUrl = process.env.NEON_AUTH_BASE_URL;
+import { getAuthVerificationConfig } from "../config/integration-env.js";
 
-if(!jwksUrl || !baseUrl) {
-    throw new Error("neon auth env variables are missing or not set");
+const authConfig = getAuthVerificationConfig();
+let jwks;
+
+function getJwks() {
+  if (!jwks) {
+    jwks = createRemoteJWKSet(new URL(authConfig.jwksUrl), {
+      timeoutDuration: 10000
+    });
+  }
+  return jwks;
 }
 
-
-const JWKS = createRemoteJWKSet(new URL(jwksUrl), {
-    timeoutDuration: 10000
-});
-const issuer = new URL(baseUrl).origin;
-
-JWKS.reload().catch(() => {});
-
-export async function verifyToken(req,res,next){
-    try{
+export async function verifyToken(req, res, next) {
+  try {
     const authHeader = req.headers.authorization;
-    if(!authHeader?.startsWith("Bearer ")){
-        return res.status(401).json({
-            success: false,
-            error: "Unauthorized"
-        });
+    if (!authHeader?.startsWith("Bearer ")) {
+      return res.status(401).json({
+        success: false,
+        error: "Unauthorized"
+      });
     }
 
     const token = authHeader.slice(7);
-    
-    
-    const{payload}= await jwtVerify(token, JWKS, {
-        issuer,
-        audience: issuer,
+    const { payload } = await jwtVerify(token, getJwks(), {
+      issuer: authConfig.issuer,
+      audience: authConfig.issuer
     });
 
-    if(typeof payload.sub !== "string" || !payload.sub){
-        return res.status(401).json({
-            success: false,
-            error: "Unauthorized / Invalid"
-        });
-    }
-
-    req.user = {
-        id: payload.sub,
-    }
-    next();
-  }catch(error){
-    console.error("Authentication error:", error);
-    return res.status(401).json({
+    if (typeof payload.sub !== "string" || !payload.sub) {
+      return res.status(401).json({
         success: false,
         error: "Unauthorized / Invalid"
+      });
+    }
+
+    req.user = { id: payload.sub };
+    next();
+  } catch (error) {
+    console.error("Authentication error:", error);
+    return res.status(401).json({
+      success: false,
+      error: "Unauthorized / Invalid"
     });
   }
-} 
+}

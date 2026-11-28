@@ -4,12 +4,10 @@ import { once } from "node:events";
 import { existsSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "node:test";
+import { after, before, test } from "node:test";
 
 import { decodeJwt, createRemoteJWKSet, jwtVerify } from "jose";
 
-import app from "../src/app.js";
-import pool from "../src/config/database.js";
 import { validateIntegrationEnvironment } from "../src/config/integration-env.js";
 import { readAuthUserVerificationRows } from "./phase1-auth.helpers.js";
 
@@ -25,6 +23,9 @@ if (process.env.INTEGRATION_MODE !== "true") {
 }
 
 validateIntegrationEnvironment();
+
+const { default: app } = await import("../src/app.js");
+const { default: pool } = await import("../src/config/database.js");
 
 const AUTH_BASE_URL = process.env.TEST_NEON_AUTH_URL.replace(/\/+$/, "");
 const AUTH_ORIGIN = process.env.TEST_AUTH_ORIGIN;
@@ -550,22 +551,20 @@ async function ownership(apiOrigin) {
   assert.deepEqual(originalUsers, state.originalUsers);
 }
 
+before(async () => {
+  await preflight();
+});
+
+after(async () => {
+  await pool.end();
+});
+
 test("Phase 1 recovery real Neon Auth and user isolation", async (t) => {
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   const apiOrigin = `http://127.0.0.1:${server.address().port}`;
 
   try {
-    let preflightPassed = false;
-    await t.test("Phase 1A isolated recovery preflight", async () => {
-      await preflight();
-      preflightPassed = true;
-    });
-
-    if (!preflightPassed) {
-      return;
-    }
-
     let authenticationPassed = false;
     await t.test("Phase 1B replacement user Managed Better Auth", async () => {
       await authentication(apiOrigin);
@@ -604,6 +603,5 @@ test("Phase 1 recovery real Neon Auth and user isolation", async (t) => {
     await new Promise((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
     });
-    await pool.end();
   }
 });

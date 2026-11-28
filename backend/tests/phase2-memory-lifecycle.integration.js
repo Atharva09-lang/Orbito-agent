@@ -4,18 +4,11 @@ import { once } from "node:events";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "node:test";
+import { after, before, test } from "node:test";
 
 import { createRemoteJWKSet, decodeJwt, jwtVerify } from "jose";
 
-import app from "../src/app.js";
-import pool from "../src/config/database.js";
-import { validateIntegrationEnvironment } from "../src/config/integration-env.js";
-import {
-  getRelevantMemories,
-  supersedeMemory
-} from "../src/repositories/memory.repository.js";
-import { retrieveMemoryContext } from "../src/services/agent.service.js";
+import { getIntegrationDatabaseConfig, validateIntegrationEnvironment } from "../src/config/integration-env.js";
 import {
   analyzeMemoryAttribution,
   getPreferenceCategory,
@@ -45,6 +38,11 @@ if (process.env.INTEGRATION_MODE !== "true") {
 }
 
 validateIntegrationEnvironment();
+
+const { default: app } = await import("../src/app.js");
+const { default: pool } = await import("../src/config/database.js");
+const { getRelevantMemories, supersedeMemory } = await import("../src/repositories/memory.repository.js");
+const { retrieveMemoryContext } = await import("../src/services/agent.service.js");
 
 const AUTH_BASE_URL = process.env.TEST_NEON_AUTH_URL.replace(/\/+$/, "");
 const AUTH_ORIGIN = process.env.TEST_AUTH_ORIGIN;
@@ -268,10 +266,10 @@ async function preflight() {
   assert.equal(process.env.TEST_CONVERSATION_ID, undefined);
   assert.equal(process.env.TEST_MEMORY_ID, undefined);
 
-  const dbUrl = new URL(process.env.DATABASE_URL_POOLED);
+  const databaseConfig = getIntegrationDatabaseConfig();
   const authUrl = new URL(process.env.NEON_AUTH_BASE_URL);
   const jwksUrl = new URL(process.env.NEON_AUTH_JWKS_URL);
-  const endpoint = dbUrl.hostname.split(".")[0].replace(/-pooler$/, "");
+  const endpoint = databaseConfig.host.split(".")[0].replace(/-pooler$/, "");
   assert.equal(endpoint, "ep-rough-king-bi6v85y5");
   assert.equal(authUrl.hostname.split(".")[0], endpoint);
   assert.equal(jwksUrl.hostname.split(".")[0], endpoint);
@@ -507,8 +505,15 @@ async function finalAudit() {
   console.log(JSON.stringify({ phase2Summary: summary }, null, 2));
 }
 
-test("Phase 2 real Neon memory lifecycle", async () => {
+before(async () => {
   await preflight();
+});
+
+after(async () => {
+  await pool.end();
+});
+
+test("Phase 2 real Neon memory lifecycle", async () => {
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   const apiOrigin = `http://127.0.0.1:${server.address().port}`;
@@ -1276,6 +1281,5 @@ test("Phase 2 real Neon memory lifecycle", async () => {
     await new Promise((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
     });
-    await pool.end();
   }
 });

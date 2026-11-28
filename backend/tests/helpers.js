@@ -19,30 +19,6 @@ const AUTH_ORIGIN = process.env.TEST_AUTH_ORIGIN || "http://localhost:5173";
 export const API_BASE_URL =
   process.env.TEST_API_URL || "http://localhost:5000/api";
 
-export function getTestConversationId() {
-  const id = process.env.TEST_CONVERSATION_ID;
-
-  if (!id) {
-    throw new Error(
-      "Set TEST_CONVERSATION_ID in .env.integration.local."
-    );
-  }
-
-  return id;
-}
-
-export function getTestMemoryId() {
-  const id = process.env.TEST_MEMORY_ID;
-
-  if (!id) {
-    throw new Error(
-      "Set TEST_MEMORY_ID in .env.integration.local."
-    );
-  }
-
-  return id;
-}
-
 export async function getAuthToken() {
   if (process.env.INTEGRATION_MODE !== "true") {
     throw new Error("Integration mode is required for authenticated tests.");

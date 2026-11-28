@@ -1,32 +1,30 @@
 
-const API_URL = "http://localhost:5000/";
+const API_URL = process.env.TEST_API_URL?.replace(/\/+$/, "");
+if (!API_URL) {
+  throw new Error("TEST_API_URL is required for HTTP integration tests.");
+}
 
-async function testBodyLimit() {
+async function testInvalidJson() {
   try {
-    const largePayload = JSON.stringify({
-      data: "A".repeat(150 * 1024)
-    });
-
     const response = await fetch(API_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
       },
-      body: largePayload
+      body: '{"name": "Minimi", "message": }'
     });
 
     const result = await response.json();
 
-    console.log("Payload size:", largePayload.length, "bytes");
     console.log("HTTP Status:", response.status);
     console.log("Response:", result);
 
     if (
-      response.status === 413 &&
+      response.status === 400 &&
       result.success === false &&
-      result.message?.includes("100 KB")
+      result.message === "Invalid JSON request body."
     ) {
-      console.log("PASS: Centralized body-size error handling works.");
+      console.log("PASS: Invalid JSON handled correctly.");
     } else {
       console.log("FAIL: Unexpected error response.");
       process.exitCode = 1;
@@ -37,4 +35,4 @@ async function testBodyLimit() {
   }
 }
 
-testBodyLimit();
+testInvalidJson();

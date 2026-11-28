@@ -7,7 +7,15 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch-path=./src src/server.js",
-    "test:unit": "node --test tests/unit/*.test.js"
+    "test:unit": "node tests/unit/run-unit-tests.js",
+    "test:integration:ownership": "node tests/memory-ownership.integration.js",
+    "test:integration:http": "node tests/run-http-integration.js",
+    "test:integration:phase1": "node --test tests/phase1-auth-isolation.integration.js",
+    "test:integration:phase1-preservation": "node --test tests/phase1-auth-preservation.integration.js",
+    "test:integration:phase2-lifecycle": "node --test tests/phase2-memory-lifecycle.integration.js",
+    "test:integration:phase2-repository": "node --test tests/phase2-memory-repository.integration.js",
+    "test:integration:phase2-fix-regression": "node --test tests/phase2-memory-fix-regression.integration.js",
+    "test:integration:phase3": "node --test tests/phase3-memory-concurrency.integration.js"
   },
   "keywords": [],
   "author": "",
@@ -22,6 +30,7 @@
     "jose": "^6.2.17",
     "openai": "^7.55.0",
     "pg": "^8.23.1",
+    "pg-connection-string": "^2.14.1",
     "zod": "^4.6.7"
   }
 }

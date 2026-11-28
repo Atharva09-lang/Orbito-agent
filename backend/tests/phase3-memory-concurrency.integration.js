@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { test } from "node:test";
+import { after, before, test } from "node:test";
 
 import pg from "pg";
 
-import { validateIntegrationEnvironment } from "../src/config/integration-env.js";
+import {
+  APPROVED_INTEGRATION_TARGET,
+  getIntegrationDatabaseConfig,
+  validateIntegrationEnvironment
+} from "../src/config/integration-env.js";
 import {
   analyzeMemoryAttribution,
   getPreferenceCategory
@@ -14,7 +18,7 @@ import {
 
 const EXPECTED_PROJECT_ID = "odd-bread-81511600";
 const EXPECTED_BRANCH_ID = "br-lively-tree-bi1z37kh";
-const EXPECTED_ENDPOINT = "ep-rough-king-bi6v85y5";
+const EXPECTED_ENDPOINT = APPROVED_INTEGRATION_TARGET.databaseHost.split(".")[0].replace(/-pooler$/, "");
 const RUN_ID = `phase3-${randomUUID()}`;
 const DUPLICATE_WIDTHS = process.env.PHASE3_WIDTH_10 === "true" ? [5, 10] : [5];
 const RUN_DUPLICATE_CREATION = process.env.PHASE3_SKIP_A !== "true";
@@ -44,17 +48,22 @@ let getUserMemories;
 let supersedeMemory;
 let updateMemory;
 
-assert.equal(process.env.INTEGRATION_MODE, "true");
+if (process.env.INTEGRATION_MODE !== "true") {
+  throw new Error("Approved isolated integration mode is required.");
+}
 validateIntegrationEnvironment();
 assert.equal(process.env.TEST_NEON_PROJECT_ID, EXPECTED_PROJECT_ID);
 assert.equal(process.env.TEST_NEON_BRANCH_ID, EXPECTED_BRANCH_ID);
 assert.ok(USER_A && USER_B && USER_A !== USER_B);
+const fixtureManifest = JSON.parse(readFileSync(
+  new URL("../phase2-identities.integration.local.json", import.meta.url),
+  "utf8"
+));
+assert.equal(USER_A, fixtureManifest.userAId);
+assert.equal(USER_B, fixtureManifest.userBId);
 
-const dbUrl = new URL(process.env.DATABASE_URL_POOLED);
 const authUrl = new URL(process.env.NEON_AUTH_BASE_URL);
 const jwksUrl = new URL(process.env.NEON_AUTH_JWKS_URL);
-const endpoint = dbUrl.hostname.split(".")[0].replace(/-pooler$/, "");
-assert.equal(endpoint, EXPECTED_ENDPOINT);
 assert.equal(authUrl.hostname.split(".")[0], EXPECTED_ENDPOINT);
 assert.equal(jwksUrl.hostname.split(".")[0], EXPECTED_ENDPOINT);
 
@@ -110,7 +119,7 @@ function instrumentPoolConnect(pool, originalConnect, hooks) {
 }
 
 const auditPool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL_POOLED,
+  ...getIntegrationDatabaseConfig(),
   max: 3
 });
 let auditActiveClients = 0;
@@ -415,8 +424,8 @@ async function preflight() {
     runMode: RUN_MODE,
     projectId: EXPECTED_PROJECT_ID,
     branchId: EXPECTED_BRANCH_ID,
-    endpoint,
-    databaseHost: dbUrl.hostname,
+    endpoint: EXPECTED_ENDPOINT,
+    databaseHost: APPROVED_INTEGRATION_TARGET.databaseHost,
     database: identity.rows[0].database,
     dbUser: identity.rows[0].db_user,
     postgresVersion: identity.rows[0].version,
@@ -905,10 +914,10 @@ async function serializationScenario() {
   const serializationLoser = `I lost the Phase 3 serialization fixture ${RUN_ID}.`;
   const serializationTarget = await createMemory(USER_A, "fact", serializationOriginal);
   assert.ok(serializationTarget);
-  const directUrl = new URL(process.env.DATABASE_URL_POOLED);
-  assert.equal(directUrl.hostname.split(".")[0].replace(/-pooler$/, ""), EXPECTED_ENDPOINT);
-  directUrl.hostname = directUrl.hostname.replace("-pooler.", ".");
-  const directPool = new pg.Pool({ connectionString: directUrl.toString(), max: 2 });
+  const directPool = new pg.Pool({
+    ...getIntegrationDatabaseConfig(process.env, { direct: true }),
+    max: 2
+  });
   let first = null;
   let second = null;
   let secondPid;
@@ -1131,63 +1140,66 @@ async function finalAudit() {
   }, null, 2));
 }
 
-test(`Phase 3 real PostgreSQL memory concurrency (${RUN_MODE})`, async () => {
-  try {
-    const { default: repositoryPool } = await import("../src/config/database.js");
-    pool = repositoryPool;
-    const repository = await import("../src/repositories/memory.repository.js");
-    ({
-      createMemory,
-      deactivateMemory,
-      getMemoryById,
-      getUserMemories,
-      supersedeMemory,
-      updateMemory
-    } = repository);
-    originalConnect = pool.connect.bind(pool);
-    instrumentPoolConnect(pool, originalConnect, {
-      acquire() {
-        activeClients += 1;
-        acquiredClients += 1;
-      },
-      async ready(client) {
-        const pidResult = await client.query("SELECT pg_backend_pid() AS pid");
-        lastBackendPid = pidResult.rows[0].pid;
-        backendPids.push(lastBackendPid);
-        if (connectGate) {
-          connectGate.arrived += 1;
-          connectGate.peakActive = Math.max(connectGate.peakActive, activeClients);
-          if (connectGate.arrived === connectGate.expected) {
-            connectGate.resolve();
-          }
-          await connectGate.promise;
+before(async () => {
+  const { default: repositoryPool } = await import("../src/config/database.js");
+  pool = repositoryPool;
+  const repository = await import("../src/repositories/memory.repository.js");
+  ({
+    createMemory,
+    deactivateMemory,
+    getMemoryById,
+    getUserMemories,
+    supersedeMemory,
+    updateMemory
+  } = repository);
+  originalConnect = pool.connect.bind(pool);
+  instrumentPoolConnect(pool, originalConnect, {
+    acquire() {
+      activeClients += 1;
+      acquiredClients += 1;
+    },
+    async ready(client) {
+      const pidResult = await client.query("SELECT pg_backend_pid() AS pid");
+      lastBackendPid = pidResult.rows[0].pid;
+      backendPids.push(lastBackendPid);
+      if (connectGate) {
+        connectGate.arrived += 1;
+        connectGate.peakActive = Math.max(connectGate.peakActive, activeClients);
+        if (connectGate.arrived === connectGate.expected) {
+          connectGate.resolve();
         }
-      },
-      release() {
-        activeClients -= 1;
-        releasedClients += 1;
+        await connectGate.promise;
       }
-    });
+    },
+    release() {
+      activeClients -= 1;
+      releasedClients += 1;
+    }
+  });
 
-    await preflight();
-    if (ONLY_F4) {
-      await serializationScenario();
-    } else {
-      if (RUN_DUPLICATE_CREATION) {
-        await duplicateCreationScenarios();
-      }
-      await supersedeScenarios();
-      await updateDeactivateScenarios();
-      await temporaryPermanentScenarios();
-      await crossUserScenarios();
-      await transactionScenarios();
-    }
-    await finalAudit();
-  } finally {
-    if (pool && originalConnect) {
-      pool.connect = originalConnect;
-    }
-    auditPool.connect = originalAuditConnect;
-    await Promise.all([pool ? pool.end() : Promise.resolve(), auditPool.end()]);
+  await preflight();
+});
+
+after(async () => {
+  if (pool && originalConnect) {
+    pool.connect = originalConnect;
   }
+  auditPool.connect = originalAuditConnect;
+  await Promise.all([pool ? pool.end() : Promise.resolve(), auditPool.end()]);
+});
+
+test(`Phase 3 real PostgreSQL memory concurrency (${RUN_MODE})`, async () => {
+  if (ONLY_F4) {
+    await serializationScenario();
+  } else {
+    if (RUN_DUPLICATE_CREATION) {
+      await duplicateCreationScenarios();
+    }
+    await supersedeScenarios();
+    await updateDeactivateScenarios();
+    await temporaryPermanentScenarios();
+    await crossUserScenarios();
+    await transactionScenarios();
+  }
+  await finalAudit();
 });

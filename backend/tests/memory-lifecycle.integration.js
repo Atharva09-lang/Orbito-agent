@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 
 import { getAuthToken, API_BASE_URL } from "./helpers.js";
 
@@ -14,12 +15,13 @@ async function testMemoryLifecycle() {
     headers.Authorization = `Bearer ${token}`;
 
     // 1. Create memory
+    const originalContent = `Temporary memory lifecycle fixture ${randomUUID()}.`;
     const createResponse = await fetch(`${API_BASE_URL}/memories`, {
       method: "POST",
       headers,
       body: JSON.stringify({
         memoryType: "fact",
-        content: "Temporary memory lifecycle test.",
+        content: originalContent,
         confidence: 0.95,
         importance: 2
       })
@@ -27,7 +29,11 @@ async function testMemoryLifecycle() {
 
     const createResult = await createResponse.json();
 
-    if (!createResponse.ok || !createResult.memory?.id) {
+    if (
+      createResponse.status !== 201 ||
+      createResult.success !== true ||
+      !createResult.memory?.id
+    ) {
       throw new Error(`Memory creation failed: ${JSON.stringify(createResult)}`);
     }
 
@@ -35,13 +41,14 @@ async function testMemoryLifecycle() {
     console.log("PASS: Memory created — HTTP", createResponse.status);
 
     // 2. Update memory
+    const updatedContent = `Updated temporary memory lifecycle fixture ${randomUUID()}.`;
     const updateResponse = await fetch(
       `${API_BASE_URL}/memories/${memoryId}`,
       {
         method: "PATCH",
         headers,
         body: JSON.stringify({
-          content: "Updated temporary lifecycle test."
+          content: updatedContent
         })
       }
     );
@@ -49,8 +56,10 @@ async function testMemoryLifecycle() {
     const updateResult = await updateResponse.json();
 
     if (
-      !updateResponse.ok ||
-      updateResult.memory?.content !== "Updated temporary lifecycle test."
+      updateResponse.status !== 200 ||
+      updateResult.success !== true ||
+      updateResult.memory?.id !== memoryId ||
+      updateResult.memory?.content !== updatedContent
     ) {
       throw new Error(`Memory update failed: ${JSON.stringify(updateResult)}`);
     }
@@ -68,7 +77,7 @@ async function testMemoryLifecycle() {
 
     const deleteResult = await deleteResponse.json();
 
-    if (!deleteResponse.ok || deleteResult.success !== true) {
+    if (deleteResponse.status !== 200 || deleteResult.success !== true) {
       throw new Error(`Memory deletion failed: ${JSON.stringify(deleteResult)}`);
     }
 
@@ -91,13 +100,17 @@ async function testMemoryLifecycle() {
           }
         );
 
-        console.log(
-          cleanupResponse.ok
-            ? "Cleanup: Temporary memory deactivated."
-            : "Cleanup warning: Could not deactivate temporary memory."
-        );
-      } catch {
-        console.log("Cleanup warning: Could not reach the API.");
+        if (cleanupResponse.status !== 200) {
+          throw new Error(`Cleanup failed: HTTP ${cleanupResponse.status}.`);
+        }
+        const cleanupResult = await cleanupResponse.json();
+        if (cleanupResult.success !== true) {
+          throw new Error("Cleanup failed: success contract not satisfied.");
+        }
+        console.log("Cleanup: Temporary memory deactivated.");
+      } catch (error) {
+        console.error("Cleanup failed:", error.message);
+        process.exitCode = 1;
       }
     }
   }

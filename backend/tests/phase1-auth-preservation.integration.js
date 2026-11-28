@@ -6,8 +6,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 
-import app from "../src/app.js";
-import pool from "../src/config/database.js";
 import { validateIntegrationEnvironment } from "../src/config/integration-env.js";
 import { readAuthUserVerificationRows } from "./phase1-auth.helpers.js";
 
@@ -16,6 +14,9 @@ if (process.env.INTEGRATION_MODE !== "true") {
 }
 
 validateIntegrationEnvironment();
+
+const { default: app } = await import("../src/app.js");
+const { default: pool } = await import("../src/config/database.js");
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const manifest = JSON.parse(readFileSync(path.join(TEST_DIR, "../phase2-identities.integration.local.json"), "utf8"));

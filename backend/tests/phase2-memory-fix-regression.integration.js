@@ -3,22 +3,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { after, test } from "node:test";
+import { after, before, test } from "node:test";
 
-import pool from "../src/config/database.js";
 import { validateIntegrationEnvironment } from "../src/config/integration-env.js";
-import { createConversation } from "../src/repositories/conversation.repository.js";
-import {
-  createMemory,
-  deactivateMemory,
-  getMemoryById,
-  getRelevantMemories,
-  getUserMemories,
-  supersedeMemory,
-  updateMemory
-} from "../src/repositories/memory.repository.js";
-import { createMessage } from "../src/repositories/message.repository.js";
-import { retrieveMemoryContext } from "../src/services/agent.service.js";
 import {
   analyzeMemoryAttribution,
   getPreferenceCategory,
@@ -31,6 +18,20 @@ if (process.env.INTEGRATION_MODE !== "true") {
 }
 
 validateIntegrationEnvironment();
+
+const { default: pool } = await import("../src/config/database.js");
+const { createConversation } = await import("../src/repositories/conversation.repository.js");
+const {
+  createMemory,
+  deactivateMemory,
+  getMemoryById,
+  getRelevantMemories,
+  getUserMemories,
+  supersedeMemory,
+  updateMemory
+} = await import("../src/repositories/memory.repository.js");
+const { createMessage } = await import("../src/repositories/message.repository.js");
+const { retrieveMemoryContext } = await import("../src/services/agent.service.js");
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const manifest = JSON.parse(readFileSync(path.join(TEST_DIR, "../phase2-identities.integration.local.json"), "utf8"));
@@ -157,7 +158,7 @@ after(async () => {
   await pool.end();
 });
 
-test("Phase 2 fix preflight preserves the current database baseline", async () => {
+before(async () => {
   assert.equal(process.env.TEST_NEON_PROJECT_ID, "odd-bread-81511600");
   assert.equal(process.env.TEST_NEON_BRANCH_ID, "br-lively-tree-bi1z37kh");
   assert.equal(process.env.DATABASE_URL, undefined);

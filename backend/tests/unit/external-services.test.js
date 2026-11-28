@@ -4,6 +4,8 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { APPROVED_INTEGRATION_TARGET } from "../../src/config/integration-env.js";
+
 const BACKEND_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../.."
@@ -12,23 +14,24 @@ const BACKEND_DIR = path.resolve(
 const ISOLATED_ENV = {
   INTEGRATION_MODE: "true",
   NODE_ENV: "production",
-  DATABASE_URL_POOLED: "postgresql://user:pass@ep-test-pooler.example:5432/neondb",
-  NEON_AUTH_BASE_URL: "https://ep-test.neonauth.example/neondb/auth",
-  NEON_AUTH_JWKS_URL: "https://ep-test.neonauth.example/neondb/auth/.well-known/jwks.json",
+  DATABASE_URL_POOLED: `postgresql://user:pass@${APPROVED_INTEGRATION_TARGET.databaseHost}:5432/neondb`,
+  NEON_AUTH_BASE_URL: APPROVED_INTEGRATION_TARGET.authBaseUrl,
+  NEON_AUTH_JWKS_URL: APPROVED_INTEGRATION_TARGET.authJwksUrl,
   TEST_API_URL: "http://localhost:5000/api",
-  TEST_NEON_AUTH_URL: "https://ep-test.neonauth.example/neondb/auth",
+  TEST_NEON_AUTH_URL: APPROVED_INTEGRATION_TARGET.authBaseUrl,
   TEST_AUTH_ORIGIN: "http://localhost:5173",
   TEST_COOKIE_FILE: "./cookies.integration.local",
-  TEST_NEON_PROJECT_ID: "test-project-123",
-  TEST_NEON_BRANCH_ID: "br-test-123",
-  TEST_NEON_DB_HOST: "ep-test-pooler.example",
-  TEST_NEON_AUTH_HOST: "ep-test.neonauth.example"
+  TEST_NEON_PROJECT_ID: APPROVED_INTEGRATION_TARGET.projectId,
+  TEST_NEON_BRANCH_ID: APPROVED_INTEGRATION_TARGET.branchId,
+  TEST_NEON_DB_HOST: APPROVED_INTEGRATION_TARGET.databaseHost,
+  TEST_NEON_AUTH_HOST: APPROVED_INTEGRATION_TARGET.authHost
 };
 
 function runIsolated(script) {
   const env = { ...process.env, ...ISOLATED_ENV };
   delete env.GROQ_API_KEY;
   delete env.TAVILY_API_KEY;
+  delete env.PGOPTIONS;
   delete env.DATABASE_URL;
   delete env.TEST_CONVERSATION_ID;
   delete env.TEST_MEMORY_ID;
@@ -53,6 +56,18 @@ function runIsolated(script) {
 test("backend initializes database-backed routes without external API keys", () => {
   const result = runIsolated(`
     const { once } = await import("node:events");
+    const originalFetch = globalThis.fetch;
+    let externalFetchAttempts = 0;
+    globalThis.fetch = async (input, init) => {
+      const value = typeof input === "string" ? input : input.url;
+      const url = new URL(value);
+      if (url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(url.hostname)) {
+        return originalFetch(input, init);
+      }
+      externalFetchAttempts += 1;
+      throw new Error("Unexpected external fetch during app import.");
+    };
+
     const { default: app } = await import("./src/app.js");
     const server = app.listen(0, "127.0.0.1");
     await once(server, "listening");
@@ -66,12 +81,13 @@ test("backend initializes database-backed routes without external API keys", () 
 
     process.stdout.write(JSON.stringify({
       rootStatus: root.status,
-      memoriesStatus: memories.status
+      memoriesStatus: memories.status,
+      externalFetchAttempts
     }));
     process.exit(0);
   `);
 
-  assert.deepEqual(result, { rootStatus: 200, memoriesStatus: 401 });
+  assert.deepEqual(result, { rootStatus: 200, memoriesStatus: 401, externalFetchAttempts: 0 });
 });
 
 test("AI requests report missing Groq configuration without network access", () => {

@@ -3,19 +3,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { after, test } from "node:test";
+import { after, before, test } from "node:test";
 
-import pool from "../src/config/database.js";
 import { validateIntegrationEnvironment } from "../src/config/integration-env.js";
-import {
-  createMemory,
-  deactivateMemory,
-  getRelevantMemories,
-  getUserMemories,
-  supersedeMemory,
-  updateMemory
-} from "../src/repositories/memory.repository.js";
-import { retrieveMemoryContext } from "../src/services/agent.service.js";
 import {
   analyzeMemoryAttribution,
   getPreferenceCategory,
@@ -28,6 +18,17 @@ if (process.env.INTEGRATION_MODE !== "true") {
 }
 
 validateIntegrationEnvironment();
+
+const { default: pool } = await import("../src/config/database.js");
+const {
+  createMemory,
+  deactivateMemory,
+  getRelevantMemories,
+  getUserMemories,
+  supersedeMemory,
+  updateMemory
+} = await import("../src/repositories/memory.repository.js");
+const { retrieveMemoryContext } = await import("../src/services/agent.service.js");
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const manifest = JSON.parse(readFileSync(path.join(TEST_DIR, "../phase2-identities.integration.local.json"), "utf8"));
@@ -126,7 +127,7 @@ after(async () => {
   await pool.end();
 });
 
-test("Phase 2 repository preflight preserves six users and Phase 1 rows", async () => {
+before(async () => {
   assert.equal(process.env.TEST_NEON_PROJECT_ID, "odd-bread-81511600");
   assert.equal(process.env.TEST_NEON_BRANCH_ID, "br-lively-tree-bi1z37kh");
   assert.equal(process.env.DATABASE_URL, undefined);
@@ -146,6 +147,7 @@ test("Phase 2 repository preflight preserves six users and Phase 1 rows", async 
 
   const conversations = await pool.query("SELECT * FROM conversations ORDER BY id");
   const memories = await pool.query("SELECT * FROM memories ORDER BY id");
+  const messages = await pool.query("SELECT * FROM messages ORDER BY id");
   const phase1Conversations = conversations.rows.filter((row) => PHASE1_CONVERSATION_IDS.includes(row.id));
   const phase1Memories = memories.rows.filter((row) => PHASE1_MEMORY_IDS.includes(row.id));
   assert.equal(phase1Conversations.length, 2);
@@ -156,6 +158,17 @@ test("Phase 2 repository preflight preserves six users and Phase 1 rows", async 
   for (const memory of phase1Memories) {
     assert.equal(hash(memory), EXPECTED_PHASE1_MEMORY_HASHES[memory.id]);
   }
+
+  assert.equal(messages.rowCount, 1);
+  const provenanceMessage = messages.rows[0];
+  const provenanceConversation = conversations.rows.find(
+    (row) => row.id === provenanceMessage.conversation_id
+  );
+  assert.equal(provenanceMessage.id, PROVENANCE_MESSAGE_ID);
+  assert.equal(provenanceMessage.role, "user");
+  assert.equal(provenanceMessage.metadata?.status, "failed");
+  assert.ok(provenanceMessage.content.includes(RUN_ID));
+  assert.equal(provenanceConversation?.user_id, USER_A);
 
   const originalSessions = await pool.query(
     `SELECT count(*)::int AS count
