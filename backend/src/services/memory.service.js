@@ -1,10 +1,9 @@
 
 import { generateResponse } from "./llm.service.js";
 import {
-  createMemory,
+  executeMemoryPlan,
   getRelevantMemories,
-  getUserMemories,
-  supersedeMemory
+  getUserMemories
 } from "../repositories/memory.repository.js";
 import { TOKEN_BUDGETS, truncateToTokens } from "./token-budget.service.js";
 import { extractKeywords } from "../utils/keywords.js";
@@ -150,6 +149,8 @@ export async function extractAndSaveMemories(
   }
 
   let plan;
+  let savedMemories = [];
+  let supersededCount = 0;
 
   try {
     const [relatedMemories, existingMemories] = await Promise.all([
@@ -190,61 +191,15 @@ export async function extractAndSaveMemories(
       candidates,
       attributableExisting
     );
+
+    ({ savedMemories, supersededCount } = await executeMemoryPlan(
+      userId,
+      plan,
+      sourceMessageId
+    ));
   } catch (error) {
     console.error("Memory extraction failed:", error.message);
     return [];
-  }
-
-  const savedMemories = [];
-  let supersededCount = 0;
-
-  for (const step of plan) {
-    if (step.type === "skip") {
-      continue;
-    }
-
-    if (step.type === "supersede") {
-      const result = await supersedeMemory(
-        userId,
-        step.replacesId,
-        step.memory.memoryType,
-        step.memory.content,
-        {
-          confidence: step.memory.confidence,
-          importance: step.memory.importance,
-          expiresAt: step.memory.expiresAt,
-          sourceMessageId
-        }
-      );
-
-      if (result.status !== "superseded") {
-        console.error(`Memory supersede skipped: ${result.status}`);
-        continue;
-      }
-
-      savedMemories.push(result.memory);
-      supersededCount++;
-      continue;
-    }
-
-    const saved = await createMemory(
-      userId,
-      step.memory.memoryType,
-      step.memory.content,
-      {
-        confidence: step.memory.confidence,
-        importance: step.memory.importance,
-        expiresAt: step.memory.expiresAt,
-        sourceMessageId
-      }
-    );
-
-    if (!saved) {
-      console.error("Memory insert skipped: invalid source message.");
-      continue;
-    }
-
-    savedMemories.push(saved);
   }
 
   console.log(

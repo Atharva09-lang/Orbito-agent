@@ -299,13 +299,19 @@ export async function createMemory(
     return null;
   }
 
-  const client = await pool.connect();
+  const sharedClient = options.client;
+  const ownsTransaction = !sharedClient;
+  const client = sharedClient ?? await pool.connect();
+  const commit = () => ownsTransaction ? client.query("COMMIT") : Promise.resolve();
+  const rollback = () => ownsTransaction ? client.query("ROLLBACK") : Promise.resolve();
 
   try {
-    await client.query("BEGIN");
+    if (ownsTransaction) {
+      await client.query("BEGIN");
+    }
 
     if (!(await sourceMessageIsOwned(client, userId, options.sourceMessageId))) {
-      await client.query("ROLLBACK");
+      await rollback();
       return null;
     }
 
@@ -323,7 +329,7 @@ export async function createMemory(
     );
 
     if (duplicate) {
-      await client.query("COMMIT");
+      await commit();
       return duplicate;
     }
 
@@ -336,7 +342,7 @@ export async function createMemory(
     );
 
     if (!saved) {
-      await client.query("ROLLBACK");
+      await rollback();
       return null;
     }
 
@@ -352,16 +358,22 @@ export async function createMemory(
       saved.id
     );
 
-    await client.query("COMMIT");
+    await commit();
     return saved;
   } catch (error) {
-    try {
-      await client.query("ROLLBACK");
-    } catch {}
+    if (ownsTransaction) {
+      try {
+        await rollback();
+      } catch {}
 
-    throw new Error("Memory create transaction failed.", { cause: error });
+      throw new Error("Memory create transaction failed.", { cause: error });
+    }
+
+    throw error;
   } finally {
-    client.release();
+    if (ownsTransaction) {
+      client.release();
+    }
   }
 }
 
@@ -380,13 +392,19 @@ export async function supersedeMemory(
     return { status: "invalid_memory" };
   }
 
-  const client = await pool.connect();
+  const sharedClient = options.client;
+  const ownsTransaction = !sharedClient;
+  const client = sharedClient ?? await pool.connect();
+  const commit = () => ownsTransaction ? client.query("COMMIT") : Promise.resolve();
+  const rollback = () => ownsTransaction ? client.query("ROLLBACK") : Promise.resolve();
 
   try {
-    await client.query("BEGIN");
+    if (ownsTransaction) {
+      await client.query("BEGIN");
+    }
 
     if (!(await sourceMessageIsOwned(client, userId, options.sourceMessageId))) {
-      await client.query("ROLLBACK");
+      await rollback();
       return { status: "invalid_source" };
     }
 
@@ -407,7 +425,7 @@ export async function supersedeMemory(
       : null;
 
     if (!target) {
-      await client.query("ROLLBACK");
+      await rollback();
       return { status: "invalid_target" };
     }
 
@@ -418,7 +436,7 @@ export async function supersedeMemory(
       target.expires_at !== null ||
       expiresAt !== null
     ) {
-      await client.query("ROLLBACK");
+      await rollback();
       return { status: "incompatible_target" };
     }
 
@@ -431,14 +449,14 @@ export async function supersedeMemory(
     );
 
     if (!target.is_active) {
-      await client.query("COMMIT");
+      await commit();
       return duplicate
         ? { status: "superseded", memory: duplicate }
         : { status: "stale_target" };
     }
 
     if (duplicate?.id === target.id) {
-      await client.query("ROLLBACK");
+      await rollback();
       return { status: "duplicate_target" };
     }
 
@@ -455,7 +473,7 @@ export async function supersedeMemory(
       );
 
       if (!saved) {
-        await client.query("ROLLBACK");
+        await rollback();
         return { status: "invalid_source" };
       }
     }
@@ -470,14 +488,100 @@ export async function supersedeMemory(
       [target]
     );
 
-    await client.query("COMMIT");
+    await commit();
     return { status: "superseded", memory: saved };
+  } catch (error) {
+    if (ownsTransaction) {
+      try {
+        await rollback();
+      } catch {}
+
+      throw new Error("Memory supersede transaction failed.", { cause: error });
+    }
+
+    throw error;
+  } finally {
+    if (ownsTransaction) {
+      client.release();
+    }
+  }
+}
+
+export async function executeMemoryPlan(userId, plan, sourceMessageId) {
+  const steps = Array.isArray(plan)
+    ? plan.filter((step) => step && step.type !== "skip")
+    : [];
+
+  if (steps.length === 0) {
+    return { savedMemories: [], supersededCount: 0 };
+  }
+
+  const client = await pool.connect();
+  const savedMemories = [];
+  let supersededCount = 0;
+
+  try {
+    await client.query("BEGIN");
+
+    for (const step of steps) {
+      if (step.type === "supersede") {
+        const result = await supersedeMemory(
+          userId,
+          step.replacesId,
+          step.memory.memoryType,
+          step.memory.content,
+          {
+            confidence: step.memory.confidence,
+            importance: step.memory.importance,
+            expiresAt: step.memory.expiresAt,
+            sourceMessageId,
+            client
+          }
+        );
+
+        if (result.status !== "superseded") {
+          throw new Error(`Memory supersede failed: ${result.status}`);
+        }
+
+        savedMemories.push(result.memory);
+        supersededCount++;
+        continue;
+      }
+
+      if (step.type !== "add") {
+        throw new Error(`Unsupported memory plan action: ${step.type}`);
+      }
+
+      const saved = await createMemory(
+        userId,
+        step.memory.memoryType,
+        step.memory.content,
+        {
+          confidence: step.memory.confidence,
+          importance: step.memory.importance,
+          expiresAt: step.memory.expiresAt,
+          sourceMessageId,
+          client
+        }
+      );
+
+      if (!saved) {
+        throw new Error("Memory insert failed: invalid source message or memory details.");
+      }
+
+      savedMemories.push(saved);
+    }
+
+    await client.query("COMMIT");
+    return { savedMemories, supersededCount };
   } catch (error) {
     try {
       await client.query("ROLLBACK");
-    } catch {}
+    } catch (rollbackError) {
+      console.error("Memory extraction rollback failed:", rollbackError.message);
+    }
 
-    throw new Error("Memory supersede transaction failed.", { cause: error });
+    throw new Error("Memory extraction plan transaction failed.", { cause: error });
   } finally {
     client.release();
   }

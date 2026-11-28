@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import pool from "../../src/config/database.js";
 import {
   createMemory,
+  executeMemoryPlan,
   supersedeMemory,
   updateMemory
 } from "../../src/repositories/memory.repository.js";
@@ -11,17 +12,22 @@ import {
   analyzeMemoryAttribution,
   formatMemoryContext,
   getPreferenceCategory,
-  normalizeMemoryKey
+  normalizeMemoryKey,
+  planMemoryActions
 } from "../../src/utils/memory-format.js";
 
 function createMockClient(handler, options = {}) {
   const calls = [];
   let released = false;
+  let releaseCount = 0;
 
   return {
     calls,
     get released() {
       return released;
+    },
+    get releaseCount() {
+      return releaseCount;
     },
     async query(text, params = []) {
       const normalized = text.replace(/\s+/g, " ").trim();
@@ -43,6 +49,7 @@ function createMockClient(handler, options = {}) {
     },
     release() {
       released = true;
+      releaseCount++;
     }
   };
 }
@@ -336,7 +343,7 @@ function createStoreClient(store, gate, options = {}) {
     }
 
     throw new Error(`Unexpected query: ${text}`);
-  }, { transactions: true });
+  }, { transactions: true, sourceOwned: options.sourceOwned });
 
   return serializeAdvisoryLocks(client, gate, () => {
     snapshotPending = true;
@@ -1737,4 +1744,216 @@ test("repository updates do not treat distinct or empty Unicode keys as no-ops",
       assert.equal(gate.active, 0);
     });
   }
+});
+
+function extractionItem(content, overrides = {}) {
+  return {
+    action: "add",
+    replaces_id: null,
+    subject: "user",
+    memory_type: "fact",
+    content,
+    duration: "permanent",
+    expires_in_days: null,
+    confidence: 0.99,
+    importance: 3,
+    ...overrides
+  };
+}
+
+function transactionCommands(client) {
+  return client.calls
+    .map((call) => call.text)
+    .filter((text) => ["BEGIN", "COMMIT", "ROLLBACK"].includes(text));
+}
+
+test("an extraction plan commits adds and superseding through one transaction", async (t) => {
+  const target = {
+    ...pythonPreference,
+    id: "old-preference",
+    content: "Old preference.",
+    user_id: "user-a",
+    is_active: true
+  };
+  const store = [target];
+  const gate = createAdvisoryGate();
+  const client = createStoreClient(store, gate);
+  let connectCount = 0;
+  t.mock.method(pool, "connect", async () => {
+    connectCount++;
+    return client;
+  });
+  const plan = planMemoryActions([
+    extractionItem("First fact."),
+    extractionItem("Second fact."),
+    extractionItem("Replacement preference.", {
+      action: "update",
+      replaces_id: target.id,
+      memory_type: "preference"
+    })
+  ], [target], [target]);
+
+  const result = await executeMemoryPlan("user-a", plan, "source-id");
+
+  assert.deepEqual(plan.map((step) => step.type), ["add", "add", "supersede"]);
+  assert.equal(result.savedMemories.length, 3);
+  assert.equal(result.supersededCount, 1);
+  assert.equal(connectCount, 1);
+  assert.deepEqual(transactionCommands(client), ["BEGIN", "COMMIT"]);
+  assert.equal(client.releaseCount, 1);
+  assert.equal(store.length, 5);
+  assert.equal(store.find((memory) => memory.id === target.id).is_active, false);
+  assert.deepEqual(store.filter((memory) => memory.is_active).map((memory) => memory.content), [
+    "First fact.",
+    "Second fact.",
+    "Replacement preference.",
+    "Previous preference: Old preference."
+  ]);
+  assert.equal(gate.active, 0);
+});
+
+test("a third-operation failure rolls back the whole plan and a retry succeeds cleanly", async (t) => {
+  const target = {
+    ...pythonPreference,
+    id: "old-preference",
+    content: "Old preference.",
+    user_id: "user-a",
+    is_active: true
+  };
+  const store = [target];
+  const gate = createAdvisoryGate();
+  const client = createStoreClient(store, gate, { failDeactivation: true });
+  const retryClient = createStoreClient(store, gate);
+  const clients = [client, retryClient];
+  let connectIndex = 0;
+  t.mock.method(pool, "connect", async () => clients[connectIndex++]);
+  const plan = planMemoryActions([
+    extractionItem("First fact."),
+    extractionItem("Second fact."),
+    extractionItem("Replacement preference.", {
+      action: "update",
+      replaces_id: target.id,
+      memory_type: "preference"
+    })
+  ], [target], [target]);
+
+  await assert.rejects(executeMemoryPlan("user-a", plan, "source-id"), (error) => {
+    assert.match(error.message, /Memory extraction plan transaction failed/);
+    assert.match(error.cause.message, /simulated deactivation failure/);
+    return true;
+  });
+
+  assert.deepEqual(store, [target]);
+  assert.equal(store[0].is_active, true);
+  assert.deepEqual(transactionCommands(client), ["BEGIN", "ROLLBACK"]);
+  assert.equal(client.releaseCount, 1);
+  assert.equal(gate.active, 0);
+
+  const retry = await executeMemoryPlan("user-a", plan, "source-id");
+
+  assert.equal(retry.savedMemories.length, 3);
+  assert.equal(store.length, 5);
+  assert.equal(store.find((memory) => memory.id === target.id).is_active, false);
+  assert.deepEqual(transactionCommands(retryClient), ["BEGIN", "COMMIT"]);
+  assert.equal(retryClient.releaseCount, 1);
+  assert.equal(client.releaseCount, 1);
+  assert.equal(connectIndex, 2);
+  assert.equal(gate.active, 0);
+});
+
+test("empty and skip-only extraction plans do not acquire a transaction client", async (t) => {
+  const plans = [
+    [],
+    [{ type: "skip", reason: "duplicate" }]
+  ];
+
+  for (const [index, plan] of plans.entries()) {
+    await t.test(`plan ${index}`, async (t) => {
+      let connectCount = 0;
+      t.mock.method(pool, "connect", async () => {
+        connectCount++;
+        throw new Error("empty plans must not connect");
+      });
+
+      const result = await executeMemoryPlan("user-a", plan, "source-id");
+
+      assert.deepEqual(result, { savedMemories: [], supersededCount: 0 });
+      assert.equal(connectCount, 0);
+    });
+  }
+});
+
+test("a single-operation extraction plan retains standalone transaction behavior", async (t) => {
+  const store = [];
+  const gate = createAdvisoryGate();
+  const client = createStoreClient(store, gate);
+  mockConnect(t, client);
+  const plan = planMemoryActions([extractionItem("Only fact.")], [], []);
+
+  const result = await executeMemoryPlan("user-a", plan, "source-id");
+
+  assert.equal(result.savedMemories.length, 1);
+  assert.equal(result.supersededCount, 0);
+  assert.equal(store.length, 1);
+  assert.deepEqual(transactionCommands(client), ["BEGIN", "COMMIT"]);
+  assert.equal(client.releaseCount, 1);
+});
+
+test("an extraction plan reuses duplicates without inserting or releasing the shared client early", async (t) => {
+  const existing = {
+    ...pythonPreference,
+    id: "existing-fact",
+    memory_type: "fact",
+    content: "Saved fact.",
+    user_id: "user-a",
+    is_active: true
+  };
+  const store = [existing];
+  const gate = createAdvisoryGate();
+  const client = createStoreClient(store, gate);
+  mockConnect(t, client);
+  const plan = planMemoryActions([extractionItem("Saved fact.")], [], []);
+
+  const result = await executeMemoryPlan("user-a", plan, "source-id");
+
+  assert.equal(result.savedMemories[0].id, existing.id);
+  assert.equal(store.length, 1);
+  assert.equal(client.calls.some((call) => call.text.startsWith("INSERT INTO memories")), false);
+  assert.deepEqual(transactionCommands(client), ["BEGIN", "COMMIT"]);
+  assert.equal(client.releaseCount, 1);
+});
+
+test("an extraction plan rolls back and releases once when source ownership is invalid", async (t) => {
+  const store = [];
+  const gate = createAdvisoryGate();
+  const client = createStoreClient(store, gate, { sourceOwned: false });
+  mockConnect(t, client);
+  const plan = planMemoryActions([extractionItem("Unowned fact.")], [], []);
+
+  await assert.rejects(executeMemoryPlan("user-a", plan, "foreign-source"), (error) => {
+    assert.match(error.message, /Memory extraction plan transaction failed/);
+    assert.match(error.cause.message, /Memory insert failed/);
+    return true;
+  });
+
+  assert.equal(store.length, 0);
+  assert.equal(client.calls.some((call) => call.text.startsWith("INSERT INTO memories")), false);
+  assert.deepEqual(transactionCommands(client), ["BEGIN", "ROLLBACK"]);
+  assert.equal(client.releaseCount, 1);
+  assert.equal(gate.active, 0);
+});
+
+test("ambiguous attribution is rejected before an extraction transaction starts", async (t) => {
+  let connectCount = 0;
+  t.mock.method(pool, "connect", async () => {
+    connectCount++;
+    throw new Error("ambiguous plans must not connect");
+  });
+  const plan = planMemoryActions([extractionItem("He prefers tea.")], [], []);
+
+  assert.deepEqual(plan, [{ type: "skip", reason: "ambiguous_subject" }]);
+  const result = await executeMemoryPlan("user-a", plan, "source-id");
+
+  assert.deepEqual(result, { savedMemories: [], supersededCount: 0 });
+  assert.equal(connectCount, 0);
 });
